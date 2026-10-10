@@ -44,6 +44,7 @@ enum ListenerStatus: Equatable, Sendable {
 
 enum ConnectionKind: String, Sendable {
     case socks5 = "SOCKS5"
+    case socks5UDP = "SOCKS5 UDP"
     case httpConnect = "HTTP CONNECT"
     case httpForward = "HTTP"
     case pending = "협상 중"

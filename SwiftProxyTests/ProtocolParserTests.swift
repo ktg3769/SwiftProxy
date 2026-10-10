@@ -84,6 +84,32 @@ final class SOCKS5ParserTests: XCTestCase {
         XCTAssertEqual(SOCKS5.authResult(success: false), Data([1, 1]))
     }
 
+    func testUDPHeaderRoundTrip() throws {
+        let header = SOCKS5.udpHeader(host: .ipv4([8, 8, 8, 8]), port: 53)
+        XCTAssertEqual(header, Data([0, 0, 0, 1, 8, 8, 8, 8, 0, 53]))
+        let parsed = try XCTUnwrap(SOCKS5.parseUDPHeader(Array(header) + [0xAB, 0xCD]))
+        XCTAssertEqual(parsed, SOCKS5.UDPHeader(fragment: 0, host: .ipv4([8, 8, 8, 8]), port: 53, length: 10))
+
+        let name = Array("dns.google".utf8)
+        let domain = try XCTUnwrap(SOCKS5.parseUDPHeader([0, 0, 0, 3, UInt8(name.count)] + name + [0x01, 0xBB, 0xFF]))
+        XCTAssertEqual(domain.host, .domain("dns.google"))
+        XCTAssertEqual(domain.port, 443)
+        XCTAssertEqual(domain.length, 5 + name.count + 2)
+    }
+
+    func testUDPHeaderRejectsInvalid() {
+        XCTAssertNil(SOCKS5.parseUDPHeader([0, 1, 0, 1, 1, 2, 3, 4, 0, 53]), "RSV must be zero")
+        XCTAssertNil(SOCKS5.parseUDPHeader([0, 0, 0, 1, 1, 2, 3]), "truncated")
+        XCTAssertNil(SOCKS5.parseUDPHeader([0, 0, 0, 9, 1, 2, 3, 4, 0, 53]), "bad atyp")
+        XCTAssertNil(SOCKS5.parseUDPHeader([0, 0, 0, 1, 1, 2, 3, 4, 0, 0]), "port 0")
+        XCTAssertEqual(SOCKS5.parseUDPHeader([0, 0, 1, 1, 1, 2, 3, 4, 0, 53])?.fragment, 1)
+    }
+
+    func testReplyWithBindAddress() {
+        XCTAssertEqual(SOCKS5.reply(.succeeded, bind: .ipv4([172, 20, 10, 1]), port: 0x1234),
+                       Data([5, 0, 0, 1, 172, 20, 10, 1, 0x12, 0x34]))
+    }
+
     func testLoopbackDetection() {
         XCTAssertTrue(TargetHost.ipv4([127, 0, 0, 1]).isLoopback)
         XCTAssertTrue(TargetHost.ipv6([UInt8](repeating: 0, count: 15) + [1]).isLoopback)

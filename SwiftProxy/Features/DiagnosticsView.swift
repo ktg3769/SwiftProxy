@@ -11,9 +11,20 @@ struct DiagnosticsView: View {
                 listenerSection
                 interfaceSection
                 errorSection
-                Section("자체 테스트") {
-                    Text("아직 구현되지 않음 (Phase 5에서 추가 예정)")
-                        .foregroundStyle(.secondary)
+                Section {
+                    Button(app.selfTestRunning ? "테스트 중…" : "SOCKS5 접속 테스트") { app.runSelfTest() }
+                        .disabled(app.selfTestRunning)
+                    ForEach(app.selfTestResults) { result in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Label(result.address, systemImage: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(result.success ? .green : .red)
+                            Text(result.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("자체 테스트")
+                } footer: {
+                    Text("이 iPhone의 Wi-Fi·핫스팟 주소로 자기 SOCKS5 포트에 접속해 봅니다. 성공하면 같은 네트워크의 다른 기기도 그 주소로 접속할 수 있어야 합니다. UDP 중계에는 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 SwiftProxy 허용이 필요합니다.")
                 }
                 Section("버전") {
                     LabeledContent("앱", value: Self.appVersion)
@@ -51,7 +62,7 @@ struct DiagnosticsView: View {
         } header: {
             Text("리스너")
         } footer: {
-            Text("바인딩 정책: 모든 로컬 주소(IPv4/IPv6)에서 수신하되 셀룰러 인터페이스는 제외합니다. '로컬 네트워크만' 정책에서는 연결을 받을 때 출발지 IP가 사설 대역인지 검사합니다. IPv6 수신은 실기기에서 아직 검증하지 않았습니다.")
+            Text("바인딩 정책: 모든 로컬 주소(IPv4/IPv6)에서 수신하고, 셀룰러 인터페이스(pdp_ip*) 주소로 들어온 연결은 수락 직후 닫습니다. '로컬 네트워크만' 정책에서는 연결을 받을 때 출발지 IP가 사설 대역인지 검사합니다. IPv6 수신은 실기기에서 아직 검증하지 않았습니다.")
         }
     }
 

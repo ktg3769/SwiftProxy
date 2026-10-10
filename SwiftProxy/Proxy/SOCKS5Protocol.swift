@@ -198,4 +198,67 @@ enum SOCKS5 {
     static func reply(_ code: Reply) -> Data {
         Data([version, code.rawValue, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
     }
+
+    /// UDP ASSOCIATE 응답처럼 BND.ADDR/BND.PORT에 의미가 있는 응답.
+    static func reply(_ code: Reply, bind host: TargetHost, port: UInt16) -> Data {
+        Data([version, code.rawValue, 0x00] + encodeAddress(host, port: port))
+    }
+
+    /// ATYP + 주소 + 포트(빅엔디언).
+    static func encodeAddress(_ host: TargetHost, port: UInt16) -> [UInt8] {
+        var out: [UInt8]
+        switch host {
+        case .ipv4(let b): out = [0x01] + b
+        case .ipv6(let b): out = [0x04] + b
+        case .domain(let name):
+            let bytes = Array(name.utf8.prefix(255))
+            out = [0x03, UInt8(bytes.count)] + bytes
+        }
+        out.append(UInt8(port >> 8))
+        out.append(UInt8(port & 0xFF))
+        return out
+    }
+
+    /// SOCKS5 UDP 데이터그램 헤더: RSV(2) FRAG(1) ATYP DST.ADDR DST.PORT
+    struct UDPHeader: Equatable {
+        let fragment: UInt8
+        let host: TargetHost
+        let port: UInt16
+        /// 헤더 길이. 이 뒤가 페이로드.
+        let length: Int
+    }
+
+    static func parseUDPHeader(_ b: [UInt8]) -> UDPHeader? {
+        guard b.count >= 4, b[0] == 0, b[1] == 0 else { return nil }
+        let fragment = b[2]
+        let host: TargetHost
+        let end: Int
+        switch b[3] {
+        case 0x01:
+            guard b.count >= 10 else { return nil }
+            host = .ipv4(Array(b[4..<8]))
+            end = 8
+        case 0x04:
+            guard b.count >= 22 else { return nil }
+            host = .ipv6(Array(b[4..<20]))
+            end = 20
+        case 0x03:
+            guard b.count >= 5 else { return nil }
+            let len = Int(b[4])
+            guard len > 0, b.count >= 5 + len + 2,
+                  let name = String(bytes: b[5..<(5 + len)], encoding: .utf8),
+                  let parsed = TargetHost.parse(name) else { return nil }
+            host = parsed
+            end = 5 + len
+        default:
+            return nil
+        }
+        let port = UInt16(b[end]) << 8 | UInt16(b[end + 1])
+        guard port != 0 else { return nil }
+        return UDPHeader(fragment: fragment, host: host, port: port, length: end + 2)
+    }
+
+    static func udpHeader(host: TargetHost, port: UInt16) -> Data {
+        Data([0x00, 0x00, 0x00] + encodeAddress(host, port: port))
+    }
 }

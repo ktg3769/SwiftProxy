@@ -106,6 +106,9 @@ final class AppState {
         }
         pathMonitor.start()
         refreshAddresses()
+        // SOCKS5 UDP 응답을 다른 기기로 보내려면 로컬 네트워크 권한이 필요하다.
+        // 백그라운드에서는 알림이 뜨지 않고 거부되므로 포그라운드인 지금 미리 요청한다.
+        LocalNetworkAccess.triggerPermissionAlert()
         if settingsStore.settings.autoStart {
             log.add(.info, "자동 시작: 백그라운드 작업은 시작 버튼을 직접 눌렀을 때만 요청됩니다.")
             start(userInitiated: false)
@@ -135,6 +138,31 @@ final class AppState {
     }
 
     func dismissNotice() { sessionNotice = nil }
+
+    private(set) var selfTestResults: [ProxySelfTest.Result] = []
+    private(set) var selfTestRunning = false
+
+    /// 진단 탭의 자체 테스트: iPhone의 LAN 주소(Wi-Fi·핫스팟)로 자기 SOCKS5 포트에 접속해 본다.
+    func runSelfTest() {
+        guard !selfTestRunning else { return }
+        let settings = settingsStore.settings
+        guard runRequested, settings.socksEnabled else {
+            selfTestResults = [ProxySelfTest.Result(address: "-", success: false, detail: "SOCKS5 서버가 실행 중이 아닙니다")]
+            return
+        }
+        refreshAddresses()
+        let addresses = lanAddresses.filter { !$0.isLinkLocal }.map(\.address)
+        guard !addresses.isEmpty else {
+            selfTestResults = [ProxySelfTest.Result(address: "-", success: false, detail: "Wi-Fi/핫스팟 주소가 없습니다. 핫스팟이 켜져 있고 기기가 연결되어 있는지 확인하세요.")]
+            return
+        }
+        selfTestRunning = true
+        Task {
+            let results = await ProxySelfTest.run(addresses: addresses, port: settings.socksPort)
+            self.selfTestResults = results
+            self.selfTestRunning = false
+        }
+    }
 
     // MARK: - Control
 

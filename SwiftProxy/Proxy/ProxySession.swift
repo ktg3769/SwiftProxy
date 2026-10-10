@@ -6,7 +6,7 @@ import Network
 final class ProxySession: ProxyConnectionHandler {
     private enum Phase: Equatable {
         case socksGreeting, socksAuth, socksRequest, httpHead
-        case connecting, relaying, closing, closed
+        case connecting, relaying, udpAssociated, closing, closed
     }
 
     private enum Direction { case up, down }
@@ -35,6 +35,7 @@ final class ProxySession: ProxyConnectionHandler {
     private var lastActivity: TimeInterval
     private var upFinished = false
     private var downFinished = false
+    private var udp: UDPAssociation?
 
     init(kind: ListenerKind, client: NWConnection, id: UUID, manager: ProxyServerManager,
          configuration: ProxyServerManager.Configuration, clientLabel: String) {
@@ -56,6 +57,8 @@ final class ProxySession: ProxyConnectionHandler {
     func start() {
         client.stateUpdateHandler = { [weak self] state in
             switch state {
+            case .ready:
+                self?.rejectIfArrivedOverCellular()
             case .failed, .cancelled:
                 self?.close()
             default:
@@ -68,6 +71,19 @@ final class ProxySession: ProxyConnectionHandler {
 
     func cancel() {
         close()
+    }
+
+    /// 셀룰러 인터페이스(pdp_ip*)의 주소로 들어온 연결은 외부 인터넷에서 온 것이므로 닫는다.
+    private func rejectIfArrivedOverCellular() {
+        guard let local = client.currentPath?.localEndpoint.flatMap(ProxyServerManager.hostString),
+              let localBytes = IPParser.bytes(local) else { return }
+        let cellular = InterfaceAddresses.all().contains {
+            $0.name.hasPrefix("pdp_ip") && IPParser.bytes($0.address) == localBytes
+        }
+        if cellular {
+            manager?.log(.warning, "셀룰러 인터페이스로 들어온 연결을 거부했습니다 (\(info.clientLabel))")
+            close()
+        }
     }
 
     func tick(now: TimeInterval) -> ConnectionInfo? {
@@ -83,6 +99,20 @@ final class ProxySession: ProxyConnectionHandler {
                 manager?.log(.info, "유휴 연결 종료: \(info.target ?? "?")")
                 close()
                 return nil
+            }
+        case .udpAssociated:
+            if let udp {
+                udp.tick(now: now)
+                if now - udp.lastActivity > Self.idleTimeout {
+                    manager?.log(.info, "유휴 UDP 연결 종료")
+                    close()
+                    return nil
+                }
+                let label = "UDP · 대상 \(udp.destinationCount)개"
+                if info.target != label {
+                    info.target = label
+                    infoDirty = true
+                }
             }
         case .closing, .closed:
             return nil
@@ -213,7 +243,7 @@ final class ProxySession: ProxyConnectionHandler {
                     }
                 }
 
-            case .connecting, .relaying, .closing, .closed:
+            case .connecting, .relaying, .udpAssociated, .closing, .closed:
                 return
             }
         }
@@ -229,6 +259,9 @@ final class ProxySession: ProxyConnectionHandler {
     // MARK: - SOCKS5
 
     private func beginSOCKS(_ request: SOCKS5.Request) {
+        if request.command == SOCKS5.Command.udpAssociate {
+            return beginUDPAssociate()
+        }
         guard request.command == SOCKS5.Command.connect else {
             manager?.log(.info, "SOCKS5 명령 \(request.command) 미지원 (CONNECT만 지원)")
             return sendAndClose(SOCKS5.reply(.commandNotSupported))
@@ -248,6 +281,62 @@ final class ProxySession: ProxyConnectionHandler {
             case .failed(let reply, _, let message):
                 self.manager?.log(.info, "대상 연결 실패 \(target): \(message)")
                 self.sendAndClose(SOCKS5.reply(reply))
+            }
+        }
+    }
+
+    /// UDP ASSOCIATE: 클라이언트용 UDP 포트를 열고 그 주소를 알려 준다.
+    /// TCP 제어 연결이 열려 있는 동안만 중계하며, 제어 연결이 끊기면 함께 닫는다 (RFC 1928 7절).
+    private func beginUDPAssociate() {
+        guard let peer = ProxyServerManager.hostString(client.endpoint), let peerBytes = IPParser.bytes(peer) else {
+            return sendAndClose(SOCKS5.reply(.generalFailure))
+        }
+        // 클라이언트가 UDP를 보낼 주소: TCP 제어 연결이 들어온 iPhone 쪽 주소 (예: 172.20.10.1)
+        let bindHost: TargetHost = {
+            if let local = client.currentPath?.localEndpoint.flatMap(ProxyServerManager.hostString),
+               let b = IPParser.bytes(local) {
+                return b.count == 4 ? .ipv4(b) : .ipv6(b)
+            }
+            return .ipv4([0, 0, 0, 0])
+        }()
+        info.kind = .socks5UDP
+        info.target = "UDP"
+        infoDirty = true
+        phase = .connecting
+        deadline = ProcessInfo.processInfo.systemUptime + Self.handshakeTimeout
+
+        let association = UDPAssociation(
+            queue: queueOrMain, clientAddress: peerBytes, outboundRoute: config.outboundRoute,
+            allowLoopbackTargets: config.allowLoopbackTargets,
+            onTraffic: { [weak self] up, down in
+                if up > 0 { self?.account(.up, up) }
+                if down > 0 { self?.account(.down, down) }
+            },
+            onWarning: { [weak self] message in self?.manager?.log(.warning, message) })
+        udp = association
+        association.start { [weak self] result in
+            guard let self, self.phase == .connecting else { return }
+            switch result {
+            case .success(let port):
+                self.phase = .udpAssociated
+                self.lastActivity = ProcessInfo.processInfo.systemUptime
+                self.send(SOCKS5.reply(.succeeded, bind: bindHost, port: port))
+                self.watchControlConnection()
+            case .failure(let error):
+                self.manager?.log(.warning, "UDP 포트를 열지 못했습니다: \(error)")
+                self.sendAndClose(SOCKS5.reply(.generalFailure))
+            }
+        }
+    }
+
+    /// UDP 연결 동안 TCP 제어 연결은 데이터가 오지 않는다. 끊기면(EOF/오류) UDP 중계도 닫는다.
+    private func watchControlConnection() {
+        client.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, isComplete, error in
+            guard let self, self.phase == .udpAssociated else { return }
+            if isComplete || error != nil {
+                self.close()
+            } else {
+                self.watchControlConnection()
             }
         }
     }
@@ -519,6 +608,8 @@ final class ProxySession: ProxyConnectionHandler {
         client.cancel()
         remote?.cancel()
         remote = nil
+        udp?.close()
+        udp = nil
         manager?.handlerDidFinish(id)
     }
 }

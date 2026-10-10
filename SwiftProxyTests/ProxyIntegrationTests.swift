@@ -107,6 +107,94 @@ private final class TargetServer: @unchecked Sendable {
     }
 }
 
+/// 받은 UDP 데이터그램을 그대로 돌려주는 대상 서버.
+private final class UDPEchoServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "test.udp-echo")
+    private var flows: [NWConnection] = []
+
+    init() throws {
+        listener = try NWListener(using: .udp, on: .any)
+    }
+
+    func start() async throws -> UInt16 {
+        let resumed = LockedBox(false)
+        return try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [listener] state in
+                switch state {
+                case .ready:
+                    if resumed.withLock({ let was = $0; $0 = true; return !was }) {
+                        continuation.resume(returning: listener.port!.rawValue)
+                    }
+                case .failed(let error):
+                    if resumed.withLock({ let was = $0; $0 = true; return !was }) {
+                        continuation.resume(throwing: TestError.listenerFailed("\(error)"))
+                    }
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] flow in
+                guard let self else { return }
+                self.flows.append(flow)
+                flow.start(queue: self.queue)
+                self.echo(flow)
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private func echo(_ flow: NWConnection) {
+        flow.receiveMessage { [weak self] data, _, _, error in
+            if let data, !data.isEmpty {
+                flow.send(content: data, completion: .contentProcessed { _ in })
+            }
+            if error == nil { self?.echo(flow) }
+        }
+    }
+
+    func stop() {
+        queue.sync {
+            listener.cancel()
+            flows.forEach { $0.cancel() }
+        }
+    }
+}
+
+/// 테스트용 UDP 클라이언트 (프록시의 UDP 포트로 보낸다).
+private final class UDPTestClient: @unchecked Sendable {
+    let connection: NWConnection
+    private let queue = DispatchQueue(label: "test.udp-client")
+
+    init(port: UInt16) {
+        connection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .udp)
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 10) { [connection] in connection.cancel() }
+    }
+
+    func send(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            })
+        }
+    }
+
+    func receive() async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            connection.receiveMessage { data, _, _, error in
+                if let data, !data.isEmpty {
+                    continuation.resume(returning: data)
+                } else {
+                    continuation.resume(throwing: error ?? TestError.closed)
+                }
+            }
+        }
+    }
+
+    func close() { connection.cancel() }
+}
+
 /// 테스트용 TCP 클라이언트. 10초가 지나면 스스로 연결을 끊어 테스트가 멈추지 않게 한다.
 private final class TestClient: @unchecked Sendable {
     let connection: NWConnection
@@ -543,6 +631,76 @@ final class ProxyIntegrationTests: XCTestCase {
             }
             try await group.waitForAll()
         }
+    }
+
+    func testSOCKS5UDPAssociateEcho() async throws {
+        let echo = try UDPEchoServer()
+        defer { echo.stop() }
+        let echoPort = try await echo.start()
+        let ports = try await harness.start()
+
+        // TCP 제어 연결로 UDP ASSOCIATE 요청
+        let (control, code) = try await socksConnect(proxyPort: ports.socks, request: [5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(code, 0)
+        // socksConnect가 10바이트 응답을 읽었다. BND.ADDR/PORT를 다시 얻기 위해 같은 요청을 새 연결로 보낸다.
+        control.close()
+
+        let client = TestClient(port: ports.socks)
+        try await client.connect()
+        try await client.send([5, 1, 0])
+        let method = try await client.receive(exactly: 2)
+        XCTAssertEqual(method, Data([5, 0]))
+        try await client.send([5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        let reply = try await client.receive(exactly: 10)
+        XCTAssertEqual(reply[1], 0)
+        XCTAssertEqual(reply[3], 1, "IPv4 bind address expected")
+        XCTAssertEqual(Array(reply[4..<8]), [127, 0, 0, 1], "bind address must be the address the client used")
+        let udpPort = UInt16(reply[8]) << 8 | UInt16(reply[9])
+        XCTAssertNotEqual(udpPort, 0)
+
+        let udp = UDPTestClient(port: udpPort)
+        defer { udp.close() }
+        let header = SOCKS5.udpHeader(host: .ipv4([127, 0, 0, 1]), port: echoPort)
+        let payload = Data("udp-through-proxy".utf8)
+        try await udp.send(header + payload)
+        let response = try await udp.receive()
+        let parsed = try XCTUnwrap(SOCKS5.parseUDPHeader([UInt8](response)))
+        XCTAssertEqual(parsed.host, .ipv4([127, 0, 0, 1]))
+        XCTAssertEqual(parsed.port, echoPort)
+        XCTAssertEqual(Data([UInt8](response)[parsed.length...]), payload)
+
+        // 두 번째 데이터그램도 같은 흐름으로 중계된다.
+        let second = Data("again".utf8)
+        try await udp.send(header + second)
+        let response2 = try await udp.receive()
+        XCTAssertEqual(Data([UInt8](response2)[parsed.length...]), second)
+
+        let totals = harness.manager.counter.totals()
+        XCTAssertGreaterThanOrEqual(totals.up, UInt64(payload.count + second.count))
+        XCTAssertGreaterThanOrEqual(totals.down, UInt64(payload.count + second.count))
+        client.close()
+    }
+
+    func testSOCKS5UDPAssociationClosesWithControlConnection() async throws {
+        let ports = try await harness.start()
+        let client = TestClient(port: ports.socks)
+        try await client.connect()
+        try await client.send([5, 1, 0])
+        _ = try await client.receive(exactly: 2)
+        try await client.send([5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        let reply = try await client.receive(exactly: 10)
+        XCTAssertEqual(reply[1], 0)
+        client.close()
+        // 제어 연결이 끊기면 연결 목록에서도 사라져야 한다.
+        let deadline = Date().addingTimeInterval(3)
+        var closed = false
+        while Date() < deadline && !closed {
+            closed = harness.events.withLock { $0 }.contains {
+                if case .connectionClosed = $0 { return true } else { return false }
+            }
+            if !closed { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        XCTAssertTrue(closed)
     }
 
     func testPortConflictIsReported() async throws {

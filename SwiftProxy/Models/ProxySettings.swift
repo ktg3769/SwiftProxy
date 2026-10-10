@@ -49,9 +49,10 @@ enum LogLevel: String, Codable, CaseIterable, Identifiable, Comparable, Sendable
 /// 디스크(UserDefaults)에 저장되는 설정. 비밀번호는 여기에 저장하지 않고 Keychain에 둔다.
 struct ProxySettings: Codable, Equatable, Sendable {
     var socksEnabled: Bool = true
-    var socksPort: Int = 1080
+    /// 기본 포트는 참고 프로젝트(iOS-SOCKS-Server)와 같게 둔다: SOCKS5 9876, HTTP 9877.
+    var socksPort: Int = 9876
     var httpEnabled: Bool = true
-    var httpPort: Int = 8080
+    var httpPort: Int = 9877
     var autoStart: Bool = false
     var accessPolicy: AccessPolicy = .localNetworkOnly
     /// CIDR 문자열 목록 (예: "192.168.0.0/24", "fd00::/8").

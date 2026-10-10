@@ -165,8 +165,10 @@ final class ProxyServerManager: @unchecked Sendable {
 
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        // 셀룰러 인터페이스로 들어오는 연결은 받지 않는다 (외부 인터넷에서의 접근 차단).
-        parameters.prohibitedInterfaceTypes = [.cellular]
+        // 리스너에 인터페이스 제한(prohibitedInterfaceTypes)을 걸지 않는다.
+        // 개인용 핫스팟 모드에서는 iPhone의 외부 경로가 셀룰러뿐이라, 셀룰러를 금지하면
+        // 리스너 경로 자체가 성립하지 않을 수 있다. 셀룰러로 들어온 연결은 ProxySession이
+        // 수락 직후 로컬 주소의 인터페이스 이름(pdp_ip*)으로 판별해 닫는다.
         // 접근 제어는 accept 시점의 앱 수준 검사(AccessControl)로만 한다.
         // NWParameters.acceptLocalOnly는 loopback 연결까지 거부하는 것이 CI에서 확인되었고,
         // 실기기에서의 정확한 판정 기준도 문서로 확인할 수 없어 사용하지 않는다.
