@@ -37,9 +37,11 @@ final class AppState {
     @ObservationIgnored private var didLaunch = false
     @ObservationIgnored private let backgroundTasks = BackgroundTaskManager()
     @ObservationIgnored private let liveActivity = LiveActivityManager()
+    @ObservationIgnored private let mdnsAlias = MDNSAlias()
     @ObservationIgnored private var journal = SessionJournal()
     @ObservationIgnored private var graceTask: UIBackgroundTaskIdentifier = .invalid
     @ObservationIgnored private var lastHeartbeat = Date.distantPast
+    @ObservationIgnored private var suspendedWithoutBackgroundTask = false
 
     /// BGContinuedProcessingTask 진행률·Live Activity 갱신 간격.
     static let heartbeatInterval: TimeInterval = 5
@@ -74,6 +76,9 @@ final class AppState {
         liveActivity.onError = { [weak self] message in
             self?.log.add(.warning, message)
         }
+        mdnsAlias.onError = { [weak self] message in
+            self?.log.add(.warning, message)
+        }
     }
 
     // MARK: - Derived
@@ -98,7 +103,7 @@ final class AppState {
     var backgroundModeTitle: String {
         if !runRequested { return "중지됨" }
         if backgroundTasks.status == .running { return isInBackground ? "백그라운드 작업 실행 중" : "포그라운드 (백그라운드 작업 준비됨)" }
-        if isInBackground { return graceTask != .invalid ? "백그라운드 유예 중 (곧 중지)" : "백그라운드" }
+        if isInBackground { return "백그라운드 (백그라운드 작업 없음: iOS가 일시 중지할 수 있음)" }
         return "포그라운드"
     }
 
@@ -120,8 +125,9 @@ final class AppState {
         // 셀룰러로 실제 연결을 한 번 만들어 iOS 설정 > 셀룰러 목록에 등록되게 하고, 결과를 진단에 표시한다.
         runOutboundTest()
         if settingsStore.settings.autoStart {
-            log.add(.info, "자동 시작: 백그라운드 작업은 시작 버튼을 직접 눌렀을 때만 요청됩니다.")
-            start(userInitiated: false)
+            log.add(.info, "자동 시작")
+            // 사용자가 앱을 직접 연 시점(포그라운드)이므로 백그라운드 작업도 함께 요청한다.
+            start(userInitiated: true)
         }
     }
 
@@ -133,9 +139,10 @@ final class AppState {
             pushHeartbeat(force: true)
             return
         }
-        // 백그라운드 작업이 없으면 짧은 유예 시간 동안만 실행되고 그 뒤 iOS가 앱을 일시 중지한다.
-        // 일시 중지 상태에서는 연결을 처리할 수 없으므로, 유예가 끝나기 전에 서버를 정상 종료한다.
-        log.add(.warning, "백그라운드 작업 없이 백그라운드로 전환됨: 유예 시간이 끝나면 서버를 중지합니다.")
+        // 백그라운드 작업이 없으면 iOS가 유예 시간 뒤 앱을 일시 중지한다. 앱은 서버를 끄지 않는다.
+        // 일시 중지되는 동안은 연결을 처리할 수 없으며, 앱으로 돌아오면 리스너를 다시 연다.
+        log.add(.warning, "백그라운드 작업(\(backgroundTasks.status.title)) 없이 백그라운드로 전환됨. 서버는 끄지 않지만 iOS가 앱을 일시 중지하면 그동안 연결을 받지 못합니다.")
+        suspendedWithoutBackgroundTask = true
         beginGracePeriod()
         pushHeartbeat(force: true)
     }
@@ -145,7 +152,50 @@ final class AppState {
         isInBackground = false
         endGracePeriod()
         refreshAddresses()
-        if runRequested { pushHeartbeat(force: true) }
+        guard runRequested else { return }
+        // 일시 중지 중에 iOS가 소켓을 무효화했을 수 있으므로 리스너를 다시 연다 (서버는 계속 실행 상태).
+        if suspendedWithoutBackgroundTask {
+            suspendedWithoutBackgroundTask = false
+            reopenListeners()
+        }
+        // 백그라운드 작업이 없으면 포그라운드인 지금 다시 요청한다.
+        if !backgroundTasks.isActive && settingsStore.settings.useContinuedProcessing {
+            requestBackgroundTask()
+        }
+        pushHeartbeat(force: true)
+    }
+
+    /// 대시보드의 "백그라운드 유지 다시 요청" 버튼.
+    func requestBackgroundTask() {
+        guard runRequested, !backgroundTasks.isActive else { return }
+        backgroundTasks.begin(subtitle: portSummary(settingsStore.settings))
+        if case .failed(let reason) = backgroundTasks.status {
+            log.add(.warning, "백그라운드 작업 요청 실패: \(reason)")
+        }
+    }
+
+    /// 서버를 끄지 않고 리스너만 다시 연다 (백그라운드 작업·Live Activity·통계 유지).
+    private func reopenListeners() {
+        guard let config = makeConfiguration() else { return }
+        log.add(.info, "리스너 다시 열기")
+        server.start(config)
+    }
+
+    private func makeConfiguration() -> ProxyServerManager.Configuration? {
+        let settings = settingsStore.settings
+        var credentials: ProxyCredentials?
+        if settings.authEnabled {
+            guard let password = settingsStore.password() else { return nil }
+            credentials = ProxyCredentials(username: settings.authUsername, password: password)
+        }
+        return ProxyServerManager.Configuration(
+            socksPort: settings.socksEnabled ? settings.socksPort : nil,
+            httpPort: settings.httpEnabled ? settings.httpPort : nil,
+            accessPolicy: settings.accessPolicy,
+            allowList: settings.allowList.compactMap { IPAddressRange(cidr: $0) },
+            credentials: credentials,
+            revealAddressesInLogs: settings.logLevel == .debug,
+            outboundRoute: settings.outboundRoute)
     }
 
     func dismissNotice() { sessionNotice = nil }
@@ -231,13 +281,14 @@ final class AppState {
         refreshAddresses()
         server.start(config)
         startStatsLoop()
+        mdnsAlias.update(MDNSAlias.currentEntries())
         journal.markStarted(at: now)
         log.add(.info, "서버 시작 요청")
 
         if userInitiated && settings.useContinuedProcessing {
             backgroundTasks.begin(subtitle: portSummary(settings))
             if case .failed(let reason) = backgroundTasks.status {
-                log.add(.warning, "백그라운드 작업 요청 실패: \(reason). 앱이 포그라운드에 있는 동안만 실행됩니다.")
+                log.add(.warning, "백그라운드 작업 요청 실패: \(reason). 대시보드에서 다시 요청할 수 있습니다.")
             }
         }
         if settings.showLiveActivity {
@@ -262,6 +313,7 @@ final class AppState {
         socksStatus = .stopped
         httpStatus = .stopped
         backgroundTasks.end()
+        mdnsAlias.stop()
         liveActivity.end(finalState: activityState())
         journal.markEnded(reason: reason)
         endGracePeriod()
@@ -291,15 +343,21 @@ final class AppState {
 
     func refreshAddresses() {
         lanAddresses = InterfaceAddresses.lanAddresses()
+        // 실행 중이면 고정 이름(swiftproxy.local)이 현재 IPv6 주소를 가리키도록 갱신한다.
+        if runRequested { mdnsAlias.update(MDNSAlias.currentEntries()) }
     }
 
     // MARK: - Background
 
+    /// 시스템 또는 사용자가 백그라운드 작업을 끝냈을 때. 서버는 끄지 않는다.
+    /// iOS가 이후 앱을 일시 중지하면 그동안 연결을 받지 못하고, 앱으로 돌아오면 리스너를 다시 열고 작업을 다시 요청한다.
     private func backgroundTaskExpired() {
-        let reason = "시스템 또는 사용자가 백그라운드 작업을 종료함"
-        sessionNotice = "백그라운드 작업이 종료되어 서버를 중지했습니다. (사용자 취소 또는 시스템 자원 부족)"
-        log.add(.warning, reason)
-        stop(reason: reason)
+        sessionNotice = "iOS가 백그라운드 작업을 종료했습니다 (시스템 Live Activity에서 취소했거나 자원 부족). 서버는 켜진 상태로 두었으며, 앱으로 돌아오면 작업을 다시 요청합니다."
+        log.add(.warning, "백그라운드 작업 종료됨 (서버는 유지)")
+        if isInBackground {
+            suspendedWithoutBackgroundTask = true
+            beginGracePeriod()
+        }
     }
 
     private func beginGracePeriod() {
@@ -308,8 +366,7 @@ final class AppState {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if self.runRequested && self.backgroundTasks.status != .running {
-                    self.sessionNotice = "백그라운드 유예 시간이 끝나 서버를 중지했습니다. 백그라운드 실행에는 iOS 26 백그라운드 작업이 필요합니다."
-                    self.stop(reason: "백그라운드 유예 시간 종료")
+                    self.log.add(.warning, "백그라운드 유예 시간 종료: iOS가 앱을 일시 중지합니다 (서버 설정은 유지).")
                 }
                 self.endGracePeriod()
             }

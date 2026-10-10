@@ -28,9 +28,12 @@ final class BackgroundTaskManager {
         }
     }
 
-    /// Info.plist BGTaskSchedulerPermittedIdentifiers에 "com.taegun.swiftproxy.proxy.*"로 등록되어 있다.
-    /// 등록은 한 번만 할 수 있으므로 세션마다 고유한 식별자를 만든다.
-    static let identifierPrefix = "com.taegun.swiftproxy.proxy."
+    /// Info.plist BGTaskSchedulerPermittedIdentifiers에 "$(PRODUCT_BUNDLE_IDENTIFIER).proxy.*"로 등록되어 있다.
+    /// Apple 문서상 식별자는 앱의 Bundle ID로 시작해야 하므로 실행 중인 Bundle ID에서 만든다.
+    /// 등록은 식별자마다 한 번만 할 수 있으므로 시도마다 고유한 식별자를 쓴다.
+    static var identifierPrefix: String {
+        (Bundle.main.bundleIdentifier ?? "com.taegun.swiftproxy") + ".proxy."
+    }
     static let title = "SwiftProxy"
 
     private(set) var status: Status = .inactive {
@@ -50,6 +53,16 @@ final class BackgroundTaskManager {
     /// 사용자가 시작 버튼을 눌렀을 때(앱이 포그라운드일 때)만 호출해야 한다.
     func begin(subtitle: String) {
         guard !isActive else { return }   // 중복 제출 방지
+        // 바로 시작을 먼저 시도하고, 시스템이 바로 받을 수 없으면 대기열 방식으로 다시 요청한다.
+        if submit(subtitle: subtitle, strategy: .fail) { return }
+        let firstFailure = status
+        if submit(subtitle: subtitle, strategy: .queue) { return }
+        if case .failed(let first) = firstFailure, case .failed(let second) = status, first != second {
+            status = .failed("\(first) / 대기열 요청: \(second)")
+        }
+    }
+
+    private func submit(subtitle: String, strategy: BGContinuedProcessingTaskRequest.SubmissionStrategy) -> Bool {
 
         let identifier = Self.identifierPrefix + UUID().uuidString.lowercased()
         let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] task in
@@ -62,19 +75,20 @@ final class BackgroundTaskManager {
             }
         }
         guard registered else {
-            status = .failed("작업 등록 실패")
-            return
+            status = .failed("작업 등록 실패 (Info.plist 허용 식별자와 Bundle ID 불일치 가능: \(Bundle.main.bundleIdentifier ?? "?"))")
+            return false
         }
 
         let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: Self.title, subtitle: subtitle)
-        // 바로 시작할 수 없으면 대기열에 넣지 않고 실패시킨다 (나중에 엉뚱한 시점에 시작되는 것을 막기 위해).
-        request.strategy = .fail
+        request.strategy = strategy
         do {
             try BGTaskScheduler.shared.submit(request)
             self.identifier = identifier
             status = .submitted
+            return true
         } catch {
             status = .failed(Self.describe(error))
+            return false
         }
     }
 

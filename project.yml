@@ -44,7 +44,7 @@ targets:
         NSSupportsLiveActivities: true
         # iOS 26 BGContinuedProcessingTask: 세션마다 이 접두사 + UUID 식별자를 등록한다.
         BGTaskSchedulerPermittedIdentifiers:
-          - com.taegun.swiftproxy.proxy.*
+          - $(PRODUCT_BUNDLE_IDENTIFIER).proxy.*
         CFBundleURLTypes:
           - CFBundleURLName: com.taegun.swiftproxy
             CFBundleURLSchemes:
