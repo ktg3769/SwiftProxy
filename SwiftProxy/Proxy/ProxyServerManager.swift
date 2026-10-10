@@ -167,9 +167,9 @@ final class ProxyServerManager: @unchecked Sendable {
         parameters.allowLocalEndpointReuse = true
         // 셀룰러 인터페이스로 들어오는 연결은 받지 않는다 (외부 인터넷에서의 접근 차단).
         parameters.prohibitedInterfaceTypes = [.cellular]
-        if config.accessPolicy == .localNetworkOnly {
-            parameters.acceptLocalOnly = true
-        }
+        // 접근 제어는 accept 시점의 앱 수준 검사(AccessControl)로만 한다.
+        // NWParameters.acceptLocalOnly는 loopback 연결까지 거부하는 것이 CI에서 확인되었고,
+        // 실기기에서의 정확한 판정 기준도 문서로 확인할 수 없어 사용하지 않는다.
 
         let listener: NWListener
         do {
