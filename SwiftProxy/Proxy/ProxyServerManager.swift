@@ -212,6 +212,7 @@ final class ProxyServerManager: @unchecked Sendable {
         emit(.connectionOpened(ConnectionInfo(
             id: id, kind: .pending, clientLabel: redact(remote), target: nil,
             startedAt: Date(), bytesUp: 0, bytesDown: 0)))
+        emit(.log(.info, "연결 수락: \(redact(remote)) → \(kind.title) (로컬 \(transport.localAddress ?? "?"))"))
         handler.start()
     }
 

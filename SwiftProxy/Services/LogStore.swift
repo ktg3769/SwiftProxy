@@ -18,7 +18,7 @@ final class LogStore {
 
     @ObservationIgnored private let capacity: Int
 
-    init(capacity: Int = 200) {
+    init(capacity: Int = 500) {
         self.capacity = capacity
     }
 
@@ -35,4 +35,12 @@ final class LogStore {
     }
 
     func clear() { entries.removeAll() }
+
+    /// 붙여넣기용 텍스트. 시간 순.
+    func exportText() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return entries.map { "\(formatter.string(from: $0.date)) [\($0.level.rawValue)] \($0.message)" }
+            .joined(separator: "\n")
+    }
 }

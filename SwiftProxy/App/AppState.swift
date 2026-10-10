@@ -65,6 +65,8 @@ final class AppState {
         }
         backgroundTasks.onStatusChange = { [weak self] status in
             self?.backgroundStatus = status
+            self?.log.add(status == .running || status == .inactive ? .info : .warning,
+                          "백그라운드 작업 상태: \(status.title)")
         }
         backgroundTasks.onExpiration = { [weak self] in
             self?.backgroundTaskExpired()
@@ -139,6 +141,7 @@ final class AppState {
     }
 
     func sceneDidBecomeActive() {
+        if isInBackground { log.add(.info, "앱이 포그라운드로 돌아옴") }
         isInBackground = false
         endGracePeriod()
         refreshAddresses()

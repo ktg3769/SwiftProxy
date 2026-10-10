@@ -142,6 +142,7 @@ final class ProxySession: ProxyConnectionHandler {
 
     private func waitForMore(clientFinished: Bool) {
         if clientFinished {
+            manager?.log(.warning, "\(kind.title) 클라이언트가 핸드셰이크 중 연결을 끊음 (받은 \(buffer.count)바이트)")
             close()
         } else {
             receiveHandshake()
@@ -264,14 +265,16 @@ final class ProxySession: ProxyConnectionHandler {
             manager?.log(.warning, "loopback 대상 차단: \(target)")
             return sendAndClose(SOCKS5.reply(.notAllowed))
         }
+        manager?.log(.info, "SOCKS5 CONNECT 요청: \(target)")
         connectRemote(request.host, request.port) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case .ready:
+                self.logConnected(target)
                 self.send(SOCKS5.reply(.succeeded))
                 self.startRelay(upstreamPrefix: nil)
             case .failed(let reply, _, let message):
-                self.manager?.log(.info, "대상 연결 실패 \(target): \(message)")
+                self.manager?.log(.warning, "대상 연결 실패 \(target): \(message)")
                 self.sendAndClose(SOCKS5.reply(reply))
             }
         }
@@ -279,6 +282,12 @@ final class ProxySession: ProxyConnectionHandler {
 
     /// UDP ASSOCIATE: 클라이언트용 UDP 소켓을 열고 그 주소를 알려 준다.
     /// TCP 제어 연결이 열려 있는 동안만 중계하며, 제어 연결이 끊기면 함께 닫는다 (RFC 1928 7절).
+    private func logConnected(_ target: String) {
+        let path = remote?.currentPath
+        let interfaces = path?.availableInterfaces.map(\.name).joined(separator: ",") ?? "?"
+        manager?.log(.info, "대상 연결 성공: \(target) (경로 \(interfaces))")
+    }
+
     private func beginUDPAssociate() {
         guard let peer = client.remoteAddress, let peerBytes = IPParser.bytes(peer) else {
             return sendAndClose(SOCKS5.reply(.generalFailure))
@@ -305,6 +314,7 @@ final class ProxySession: ProxyConnectionHandler {
             udp = association
             phase = .udpAssociated
             lastActivity = ProcessInfo.processInfo.systemUptime
+            manager?.log(.info, "UDP ASSOCIATE: \(bindHost.display(port: port))")
             send(SOCKS5.reply(.succeeded, bind: bindHost, port: port))
             watchControlConnection()
         } catch {
@@ -360,10 +370,11 @@ final class ProxySession: ProxyConnectionHandler {
                 guard let self else { return }
                 switch outcome {
                 case .ready:
+                    self.logConnected(target)
                     self.send(HTTPProxy.connectEstablished)
                     self.startRelay(upstreamPrefix: nil)
                 case .failed(_, let status, let message):
-                    self.manager?.log(.info, "대상 연결 실패 \(target): \(message)")
+                    self.manager?.log(.warning, "대상 연결 실패 \(target): \(message)")
                     self.sendAndClose(HTTPProxy.response(status, status == 504 ? "Gateway Timeout" : "Bad Gateway",
                                                          body: "\(message)\n"))
                 }
@@ -391,9 +402,10 @@ final class ProxySession: ProxyConnectionHandler {
             guard let self else { return }
             switch outcome {
             case .ready:
+                self.logConnected(target)
                 self.startRelay(upstreamPrefix: upstreamHead)
             case .failed(_, let status, let message):
-                self.manager?.log(.info, "대상 연결 실패 \(target): \(message)")
+                self.manager?.log(.warning, "대상 연결 실패 \(target): \(message)")
                 self.sendAndClose(HTTPProxy.response(status, status == 504 ? "Gateway Timeout" : "Bad Gateway",
                                                      body: "\(message)\n"))
             }

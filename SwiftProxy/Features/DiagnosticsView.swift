@@ -3,6 +3,7 @@ import UIKit
 
 struct DiagnosticsView: View {
     @Environment(AppState.self) private var app
+    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -42,6 +43,20 @@ struct DiagnosticsView: View {
                 } footer: {
                     Text("이 iPhone의 Wi-Fi·핫스팟 주소로 자기 SOCKS5 포트에 접속해 봅니다. 성공하면 같은 네트워크의 다른 기기도 그 주소로 접속할 수 있어야 합니다. UDP 중계에는 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 SwiftProxy 허용이 필요합니다.")
                 }
+                Section {
+                    Button("전체 로그 복사") {
+                        UIPasteboard.general.string = app.log.exportText()
+                        copied = true
+                    }
+                    NavigationLink("전체 로그 보기 (\(app.log.entries.count))") {
+                        LogListView()
+                    }
+                } header: {
+                    Text("로그")
+                } footer: {
+                    Text(copied ? "복사했습니다. 그대로 붙여넣어 공유하세요." : "연결 수락, 요청 대상, 대상 연결 성공/실패, 백그라운드 전환이 기록됩니다. 클라이언트 IP는 일부 가려집니다.")
+                }
+
                 Section("버전") {
                     LabeledContent("앱", value: Self.appVersion)
                     LabeledContent("iOS", value: UIDevice.current.systemVersion)
@@ -122,5 +137,37 @@ struct DiagnosticsView: View {
         let version = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "\(version) (\(build))"
+    }
+}
+
+struct LogListView: View {
+    @Environment(AppState.self) private var app
+
+    var body: some View {
+        List {
+            ForEach(app.log.entries.reversed()) { entry in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.message)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Text("\(entry.level.title) · \(entry.date.formatted(date: .omitted, time: .standard))")
+                        .font(.caption2)
+                        .foregroundStyle(color(entry.level))
+                }
+            }
+        }
+        .navigationTitle("로그")
+        .toolbar {
+            Button("복사") { UIPasteboard.general.string = app.log.exportText() }
+        }
+    }
+
+    private func color(_ level: LogLevel) -> Color {
+        switch level {
+        case .error: return .red
+        case .warning: return .orange
+        case .info: return .secondary
+        case .debug: return .gray
+        }
     }
 }
