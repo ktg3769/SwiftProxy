@@ -6,7 +6,8 @@ iPhone에서 SOCKS5 / HTTP 프록시 서버를 실행하는 개인용 iOS 앱 (i
 
 ## 기능
 
-- SOCKS5 CONNECT (IPv4 / IPv6 / 도메인), 사용자 이름·비밀번호 인증 (RFC 1929)
+- SOCKS5 CONNECT (IPv4 / IPv6 / 도메인) 및 UDP ASSOCIATE, 사용자 이름·비밀번호 인증 (RFC 1929)
+- 기본 포트: SOCKS5 9876, HTTP 9877 (iOS-SOCKS-Server와 동일)
 - HTTP 포워드 프록시, HTTP CONNECT 터널, Basic 프록시 인증
 - PAC 파일: `http://<iPhone IP>:<HTTP 포트>/proxy.pac` (또는 `/wpad.dat`)
 - 연결별 통계, 연결 강제 종료, 유휴(5분)·핸드셰이크(15초) 시간 초과
@@ -54,7 +55,7 @@ scripts/verify_ipa.sh       IPA 구조 검증
 ## 보안 기본값
 
 - 접근 정책 기본값: **로컬 네트워크만** (사설 IP 대역만 허용)
-- 셀룰러 인터페이스로 들어오는 연결은 받지 않음
+- 셀룰러 인터페이스로 들어온 연결은 수락 직후 닫음
 - 인증은 기본 꺼짐. 켜면 무작위 비밀번호를 생성해 Keychain에 저장 (고정 기본 비밀번호 없음)
 - 로그의 클라이언트 IP는 디버그 수준이 아니면 일부 마스킹
 
@@ -63,4 +64,5 @@ scripts/verify_ipa.sh       IPA 구조 검증
 [docs/LIMITATIONS.md](docs/LIMITATIONS.md) 참고. 요약:
 - 백그라운드 실행은 BGContinuedProcessingTask에 의존하며, 사용자 취소·자원 부족·앱 스위처 종료 시 멈춥니다.
 - Live Activity는 표시일 뿐 서버를 살려 두지 않습니다 (갱신이 끊기면 "확인 불가"로 표시).
-- SOCKS5 BIND/UDP, SOCKS4, HTTP keep-alive 재사용은 지원하지 않습니다.
+- SOCKS5 BIND, UDP 조각, SOCKS4, HTTP keep-alive 재사용은 지원하지 않습니다.
+- UDP 중계에는 로컬 네트워크 권한이 필요합니다.
