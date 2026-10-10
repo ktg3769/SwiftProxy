@@ -71,5 +71,7 @@ enum ProxyEvent: Sendable {
     case connectionOpened(ConnectionInfo)
     case connectionUpdated(ConnectionInfo)
     case connectionClosed(UUID)
+    /// 접근 정책·연결 한도·셀룰러 인터페이스 때문에 받자마자 닫은 연결.
+    case connectionRejected
     case log(LogLevel, String)
 }

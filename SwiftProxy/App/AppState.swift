@@ -23,6 +23,10 @@ final class AppState {
     private(set) var backgroundStatus: BackgroundTaskManager.Status = .inactive
     /// 이번 실행에서 수락한 연결 수 (진단용: 다른 기기의 연결이 실제로 들어오는지 확인).
     private(set) var acceptedTotal = 0
+    /// 이번 실행에서 받자마자 거부한 연결 수 (접근 정책 등).
+    private(set) var rejectedTotal = 0
+    private(set) var outboundResults: [ProxySelfTest.Result] = []
+    private(set) var outboundRunning = false
     private(set) var isInBackground = false
     /// 이전 세션이 비정상 종료되었거나 시스템이 백그라운드 작업을 끝낸 경우의 안내.
     private(set) var sessionNotice: String?
@@ -111,6 +115,8 @@ final class AppState {
         // SOCKS5 UDP 응답을 다른 기기로 보내려면 로컬 네트워크 권한이 필요하다.
         // 백그라운드에서는 알림이 뜨지 않고 거부되므로 포그라운드인 지금 미리 요청한다.
         LocalNetworkAccess.triggerPermissionAlert()
+        // 셀룰러로 실제 연결을 한 번 만들어 iOS 설정 > 셀룰러 목록에 등록되게 하고, 결과를 진단에 표시한다.
+        runOutboundTest()
         if settingsStore.settings.autoStart {
             log.add(.info, "자동 시작: 백그라운드 작업은 시작 버튼을 직접 눌렀을 때만 요청됩니다.")
             start(userInitiated: false)
@@ -143,6 +149,20 @@ final class AppState {
 
     private(set) var selfTestResults: [ProxySelfTest.Result] = []
     private(set) var selfTestRunning = false
+
+    /// 외부 연결 테스트 (셀룰러 전용 TCP, 기본 경로 TCP, HTTP).
+    func runOutboundTest() {
+        guard !outboundRunning else { return }
+        outboundRunning = true
+        Task {
+            let results = await OutboundTest.run()
+            self.outboundResults = results
+            self.outboundRunning = false
+            for result in results where !result.success {
+                self.log.add(.warning, "외부 연결 테스트 실패 [\(result.address)]: \(result.detail)")
+            }
+        }
+    }
 
     /// 진단 탭의 자체 테스트: iPhone의 LAN 주소(Wi-Fi·핫스팟)로 자기 SOCKS5 포트에 접속해 본다.
     func runSelfTest() {
@@ -364,6 +384,8 @@ final class AppState {
             connections[info.id] = info
         case .connectionClosed(let id):
             connections.removeValue(forKey: id)
+        case .connectionRejected:
+            rejectedTotal += 1
         case .log(let level, let message):
             log.add(level, message)
             if level == .error { lastError = message }

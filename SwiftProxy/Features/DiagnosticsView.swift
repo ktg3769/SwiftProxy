@@ -12,6 +12,22 @@ struct DiagnosticsView: View {
                 interfaceSection
                 errorSection
                 Section {
+                    Button(app.outboundRunning ? "테스트 중…" : "외부 연결 테스트") { app.runOutboundTest() }
+                        .disabled(app.outboundRunning)
+                    ForEach(app.outboundResults) { result in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Label(result.address, systemImage: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundStyle(result.success ? .green : .red)
+                            Text(result.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("외부 연결")
+                } footer: {
+                    Text("앱이 셀룰러로 인터넷에 나갈 수 있는지 확인합니다. 앱을 켤 때 자동으로 한 번 실행되며, 이때 iOS 설정 > 셀룰러 목록에 SwiftProxy가 등록됩니다.")
+                }
+
+                Section {
                     Button(app.selfTestRunning ? "테스트 중…" : "SOCKS5 접속 테스트") { app.runSelfTest() }
                         .disabled(app.selfTestRunning)
                     ForEach(app.selfTestResults) { result in
@@ -60,6 +76,7 @@ struct DiagnosticsView: View {
             LabeledContent("접근 정책", value: s.accessPolicy.title)
             LabeledContent("인증", value: s.authEnabled ? "사용 (\(s.authUsername))" : "사용 안 함")
             LabeledContent("누적 수락 연결", value: "\(app.acceptedTotal)")
+            LabeledContent("누적 거부 연결", value: "\(app.rejectedTotal)")
         } header: {
             Text("리스너")
         } footer: {

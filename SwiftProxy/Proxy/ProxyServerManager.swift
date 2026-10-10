@@ -190,12 +190,14 @@ final class ProxyServerManager: @unchecked Sendable {
         guard let remote,
               AccessControl.isAllowed(address: remote, policy: config.accessPolicy, allowList: config.allowList) else {
             transport.cancel()
+            emit(.connectionRejected)
             emit(.log(.warning, "접근 거부: \(remote.map(redact) ?? "알 수 없는 주소") → \(kind.title)"))
             return
         }
 
         guard handlers.count < config.maxConnections else {
             transport.cancel()
+            emit(.connectionRejected)
             emit(.log(.warning, "동시 연결 한도(\(config.maxConnections)) 초과로 연결 거부"))
             return
         }
