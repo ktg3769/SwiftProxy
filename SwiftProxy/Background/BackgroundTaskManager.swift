@@ -1,5 +1,6 @@
 import Foundation
 import BackgroundTasks
+import UIKit
 
 /// iOS 26 BGContinuedProcessingTask로 프록시 세션을 백그라운드에서 이어 간다.
 ///
@@ -42,6 +43,7 @@ final class BackgroundTaskManager {
 
     var onStatusChange: ((Status) -> Void)?
     var onWarning: ((String) -> Void)?
+    var onInfo: ((String) -> Void)?
     /// 시스템 또는 사용자가 작업을 끝냈을 때. 호출된 쪽은 서버를 정리해야 한다.
     var onExpiration: (() -> Void)?
 
@@ -73,10 +75,17 @@ final class BackgroundTaskManager {
 
     private func submit(subtitle: String, strategy: BGContinuedProcessingTaskRequest.SubmissionStrategy) -> Bool {
 
+        // 이전 실행·빌드에서 시작되지 못하고 남은 요청이 있으면 새 요청이 그 뒤에서 기다릴 수 있으므로 모두 정리한다.
+        // (이 앱은 다른 BGTask를 쓰지 않는다)
+        BGTaskScheduler.shared.cancelAllTaskRequests()
+        onInfo?("백그라운드 작업 제출 준비: 앱 상태=\(Self.describeAppState()), Bundle ID=\(Self.runtimeBundleID)")
+
         let identifier = Self.identifierPrefix + UUID().uuidString.lowercased()
         let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] task in
             MainActor.assumeIsolated {
+                self?.onInfo?("백그라운드 작업 launch handler 호출됨 (\(type(of: task)))")
                 guard let self, let task = task as? BGContinuedProcessingTask, self.identifier == identifier else {
+                    self?.onWarning?("launch handler에서 작업을 연결하지 못함 (식별자 불일치 또는 형식 오류)")
                     task.setTaskCompleted(success: false)
                     return
                 }
@@ -90,13 +99,20 @@ final class BackgroundTaskManager {
 
         let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: Self.title, subtitle: subtitle)
         request.strategy = strategy
+        self.identifier = identifier   // launch handler가 아무리 빨리 와도 비교가 맞도록 제출 전에 기록
         do {
             try BGTaskScheduler.shared.submit(request)
-            self.identifier = identifier
             status = .submitted
             scheduleStartWatchdog(for: identifier)
+            BGTaskScheduler.shared.getPendingTaskRequests { [weak self] requests in
+                let ids = requests.map(\.identifier)
+                DispatchQueue.main.async {
+                    self?.onInfo?("대기 중인 작업 요청 \(ids.count)개: \(ids.map { String($0.suffix(12)) }.joined(separator: ", "))")
+                }
+            }
             return true
         } catch {
+            self.identifier = nil
             status = .failed(Self.describe(error))
             return false
         }
@@ -128,6 +144,26 @@ final class BackgroundTaskManager {
         identifier = nil
         heartbeatCount = 0
         status = .inactive
+    }
+
+    static func describeAppState() -> String {
+        let app: String
+        switch UIApplication.shared.applicationState {
+        case .active: app = "active"
+        case .inactive: app = "inactive"
+        case .background: app = "background"
+        @unknown default: app = "unknown"
+        }
+        let scenes = UIApplication.shared.connectedScenes.map { scene -> String in
+            switch scene.activationState {
+            case .foregroundActive: return "foregroundActive"
+            case .foregroundInactive: return "foregroundInactive"
+            case .background: return "background"
+            case .unattached: return "unattached"
+            @unknown default: return "unknown"
+            }
+        }
+        return "\(app), scenes=[\(scenes.joined(separator: ","))]"
     }
 
     private func scheduleStartWatchdog(for submitted: String) {

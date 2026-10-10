@@ -73,6 +73,9 @@ final class AppState {
         backgroundTasks.onWarning = { [weak self] message in
             self?.log.add(.warning, message)
         }
+        backgroundTasks.onInfo = { [weak self] message in
+            self?.log.add(.info, message)
+        }
         backgroundTasks.onExpiration = { [weak self] in
             self?.backgroundTaskExpired()
         }

@@ -44,6 +44,9 @@ targets:
         NSSupportsLiveActivities: true
         UIBackgroundModes:
           - processing
+        # SwiftUI 앱의 기본 Scene 설정 (Xcode가 자동 생성하는 Info.plist에는 들어 있는 값).
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
         # iOS 26 BGContinuedProcessingTask: 세션마다 이 접두사 + UUID 식별자를 등록한다.
         BGTaskSchedulerPermittedIdentifiers:
           - $(PRODUCT_BUNDLE_IDENTIFIER).proxy.*
