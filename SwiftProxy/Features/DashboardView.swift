@@ -1,0 +1,133 @@
+import SwiftUI
+import UIKit
+
+struct DashboardView: View {
+    @Environment(AppState.self) private var app
+
+    var body: some View {
+        NavigationStack {
+            List {
+                statusSection
+                if let error = app.lastError {
+                    Section("오류") {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.callout)
+                    }
+                }
+                trafficSection
+                listenerSection
+                addressSection
+                Section("네트워크") {
+                    LabeledContent("현재 경로", value: app.pathMonitor.current.summary)
+                    LabeledContent("셀룰러 경로", value: app.pathMonitor.cellularAvailable ? "사용 가능" : "없음")
+                }
+            }
+            .navigationTitle("SwiftProxy")
+            .refreshable { app.refreshAddresses() }
+        }
+    }
+
+    private var statusSection: some View {
+        Section {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 12, height: 12)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(app.statusTitle).font(.headline)
+                    if let startedAt = app.startedAt {
+                        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                            Text("실행 시간 \(Formatters.duration(context.date.timeIntervalSince(startedAt)))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                Spacer()
+                Button {
+                    app.runRequested ? app.stop() : app.start()
+                } label: {
+                    Text(app.runRequested ? "중지" : "시작")
+                        .frame(minWidth: 64)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(app.runRequested ? .red : .green)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var trafficSection: some View {
+        Section("트래픽") {
+            LabeledContent("현재 연결", value: "\(app.activeConnectionCount)")
+            LabeledContent("업로드 속도", value: Formatters.rate(app.rate.up))
+            LabeledContent("다운로드 속도", value: Formatters.rate(app.rate.down))
+            LabeledContent("누적 업로드", value: Formatters.bytes(app.totals.up))
+            LabeledContent("누적 다운로드", value: Formatters.bytes(app.totals.down))
+        }
+        .monospacedDigit()
+    }
+
+    private var listenerSection: some View {
+        let s = app.settingsStore.settings
+        return Section("리스너") {
+            LabeledContent("SOCKS5 (\(s.socksEnabled ? String(s.socksPort) : "꺼짐"))", value: app.socksStatus.title)
+            LabeledContent("HTTP (\(s.httpEnabled ? String(s.httpPort) : "꺼짐"))", value: app.httpStatus.title)
+            LabeledContent("접근 정책", value: s.accessPolicy.title)
+        }
+    }
+
+    private var addressSection: some View {
+        let s = app.settingsStore.settings
+        return Section {
+            if app.lanAddresses.isEmpty {
+                Text("Wi-Fi 또는 개인용 핫스팟 주소가 없습니다.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(app.lanAddresses) { address in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(address.kindLabel) · \(address.name)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if s.socksEnabled {
+                        copyRow("SOCKS5", endpoint(address, s.socksPort))
+                    }
+                    if s.httpEnabled {
+                        copyRow("HTTP", endpoint(address, s.httpPort))
+                    }
+                }
+            }
+        } header: {
+            Text("접속 주소")
+        } footer: {
+            Text("같은 Wi-Fi 또는 이 iPhone의 핫스팟에 연결된 기기에서 사용하세요. 셀룰러 인터페이스로는 접속을 받지 않습니다.")
+        }
+    }
+
+    private func copyRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).font(.subheadline).frame(width: 64, alignment: .leading)
+            Text(value).font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
+            Spacer()
+            Button {
+                UIPasteboard.general.string = value
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("\(label) 주소 복사")
+        }
+    }
+
+    private func endpoint(_ address: InterfaceAddress, _ port: Int) -> String {
+        address.isIPv6 ? "[\(address.address)]:\(port)" : "\(address.address):\(port)"
+    }
+
+    private var statusColor: Color {
+        if app.isRunning { return .green }
+        if app.runRequested { return app.lastError == nil ? .yellow : .red }
+        return .gray
+    }
+}

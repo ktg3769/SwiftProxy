@@ -1,0 +1,75 @@
+name: SwiftProxy
+
+options:
+  bundleIdPrefix: com.taegun
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: ko
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  SwiftProxy:
+    type: application
+    platform: iOS
+    sources:
+      - path: SwiftProxy
+    info:
+      path: SwiftProxy/Info.plist
+      properties:
+        CFBundleDisplayName: SwiftProxy
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSLocalNetworkUsageDescription: "같은 네트워크의 다른 기기가 이 iPhone의 SOCKS5/HTTP 프록시에 접속하려면 로컬 네트워크 접근 권한이 필요합니다."
+        CFBundleURLTypes:
+          - CFBundleURLName: com.taegun.swiftproxy
+            CFBundleURLSchemes:
+              - swiftproxy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.taegun.swiftproxy
+        PRODUCT_NAME: SwiftProxy
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: SwiftProxy/Info.plist
+
+  SwiftProxyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: SwiftProxyTests
+    dependencies:
+      - target: SwiftProxy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.taegun.swiftproxy.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  SwiftProxy:
+    build:
+      targets:
+        SwiftProxy: all
+        SwiftProxyTests: [test]
+    test:
+      config: Debug
+      targets:
+        - SwiftProxyTests
+    archive:
+      config: Release
