@@ -51,6 +51,14 @@ final class AccessControlTests: XCTestCase {
         }
     }
 
+    func testLocalPolicyAcceptsHotspotIPv6Prefix() throws {
+        let prefix = try XCTUnwrap(IPAddressRange(cidr: "2001:2d8:8214:7a20:18c2:9828:fc6:4e66/64"))
+        let client = "2001:2d8:8214:7a20:aaaa:bbbb:cccc:dddd"
+        XCTAssertFalse(AccessControl.isAllowed(address: client, policy: .localNetworkOnly, allowList: []))
+        XCTAssertTrue(AccessControl.isAllowed(address: client, policy: .localNetworkOnly, allowList: [], lanPrefixes: [prefix]))
+        XCTAssertFalse(AccessControl.isAllowed(address: "2001:2d8:9999::1", policy: .localNetworkOnly, allowList: [], lanPrefixes: [prefix]))
+    }
+
     func testAllowListPolicy() {
         let list = ["192.168.50.0/24"].compactMap { IPAddressRange(cidr: $0) }
         XCTAssertTrue(AccessControl.isAllowed(address: "192.168.50.9", policy: .allowList, allowList: list))

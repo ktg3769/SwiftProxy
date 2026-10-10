@@ -17,6 +17,11 @@ struct InterfaceAddress: Identifiable, Hashable, Sendable {
         name.hasPrefix("en") || name.hasPrefix("bridge")
     }
 
+    /// 핫스팟 클라이언트가 접속할 때 쓰는 공인/ULA IPv6 주소 (iOS 핫스팟에서는 IPv4로 앱에 접속이 안 되는 경우가 있다).
+    var isPreferredForHotspot: Bool {
+        name.hasPrefix("bridge") && isIPv6 && !isLinkLocal
+    }
+
     var kindLabel: String {
         if name.hasPrefix("bridge") { return "핫스팟" }
         if name.hasPrefix("en") { return "Wi-Fi" }
@@ -55,13 +60,24 @@ enum InterfaceAddresses {
     }
 
     /// 같은 LAN의 다른 기기가 접속할 수 있는 주소. IPv4를 먼저, link-local은 뒤로 보낸다.
+    /// 같은 LAN의 다른 기기가 접속할 수 있는 주소.
+    /// 핫스팟의 IPv6 주소를 맨 앞에 둔다: iOS 개인용 핫스팟에서 클라이언트 → iPhone 앱 연결이
+    /// IPv4(172.20.10.1)로는 전달되지 않고 IPv6로는 되는 것이 실기기(iOS 26.1, IPv6 전용 셀룰러)에서 확인되었다.
     static func lanAddresses() -> [InterfaceAddress] {
         all()
             .filter(\.isLANCandidate)
             .sorted { a, b in
+                if a.isPreferredForHotspot != b.isPreferredForHotspot { return a.isPreferredForHotspot }
                 if a.isLinkLocal != b.isLinkLocal { return !a.isLinkLocal }
                 if a.isIPv6 != b.isIPv6 { return !a.isIPv6 }
                 return a.name < b.name
             }
+    }
+
+    /// 핫스팟·Wi-Fi 인터페이스의 IPv6 /64 대역 (접근 제어에서 로컬로 취급).
+    static func lanIPv6Prefixes() -> [IPAddressRange] {
+        all()
+            .filter { $0.isLANCandidate && $0.isIPv6 && !$0.isLinkLocal }
+            .compactMap { IPAddressRange(cidr: "\($0.address)/64") }
     }
 }

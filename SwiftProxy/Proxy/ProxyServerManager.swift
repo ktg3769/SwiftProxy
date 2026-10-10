@@ -188,7 +188,9 @@ final class ProxyServerManager: @unchecked Sendable {
 
         let remote = transport.remoteAddress
         guard let remote,
-              AccessControl.isAllowed(address: remote, policy: config.accessPolicy, allowList: config.allowList) else {
+              AccessControl.isAllowed(address: remote, policy: config.accessPolicy, allowList: config.allowList,
+                                      lanPrefixes: config.accessPolicy == .localNetworkOnly
+                                          ? InterfaceAddresses.lanIPv6Prefixes() : []) else {
             transport.cancel()
             emit(.connectionRejected)
             emit(.log(.warning, "접근 거부: \(remote.map(redact) ?? "알 수 없는 주소") → \(kind.title)"))

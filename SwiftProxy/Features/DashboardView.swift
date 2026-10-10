@@ -107,9 +107,18 @@ struct DashboardView: View {
             }
             ForEach(app.lanAddresses) { address in
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("\(address.kindLabel) · \(address.name)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("\(address.kindLabel) · \(address.name)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if address.isPreferredForHotspot {
+                            Text("권장")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(.green.opacity(0.25), in: Capsule())
+                        }
+                    }
                     if s.socksEnabled {
                         copyRow("SOCKS5", endpoint(address, s.socksPort))
                     }
@@ -121,7 +130,7 @@ struct DashboardView: View {
         } header: {
             Text("접속 주소")
         } footer: {
-            Text("같은 Wi-Fi 또는 이 iPhone의 핫스팟에 연결된 기기에서 사용하세요. 셀룰러 인터페이스로는 접속을 받지 않습니다.")
+            Text("핫스팟에 연결된 기기는 '권장'으로 표시된 IPv6 주소를 쓰세요. iOS 핫스팟에서는 172.20.10.1(IPv4)로 이 앱에 접속이 안 될 수 있습니다. IPv6 주소는 셀룰러가 다시 연결되면 바뀔 수 있으니, 접속이 안 되면 여기서 새 주소를 확인하세요.")
         }
     }
 

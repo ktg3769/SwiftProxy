@@ -94,13 +94,16 @@ enum AccessControl {
         "::1/128",
     ].compactMap { IPAddressRange(cidr: $0) }
 
-    static func isAllowed(address: String, policy: AccessPolicy, allowList: [IPAddressRange]) -> Bool {
+    /// - Parameter lanPrefixes: iPhone의 Wi-Fi·핫스팟 인터페이스에 붙은 IPv6 대역(/64).
+    ///   핫스팟 클라이언트는 통신사에서 받은 공인 IPv6(예: 2001:…)를 쓰므로 사설 대역 검사만으로는 거부된다.
+    static func isAllowed(address: String, policy: AccessPolicy, allowList: [IPAddressRange],
+                          lanPrefixes: [IPAddressRange] = []) -> Bool {
         switch policy {
         case .anyone:
             return true
         case .localNetworkOnly:
             guard let b = IPParser.bytes(address) else { return false }
-            return localRanges.contains { $0.contains(b) }
+            return localRanges.contains { $0.contains(b) } || lanPrefixes.contains { $0.contains(b) }
         case .allowList:
             guard let b = IPParser.bytes(address) else { return false }
             return allowList.contains { $0.contains(b) }
