@@ -45,6 +45,19 @@ final class BackgroundTaskManager {
     var onExpiration: (() -> Void)?
 
     private var identifier: String?
+    /// 제출 후 이 시간 안에 시작되지 않으면 실패로 본다 (Apple: .fail은 즉시 시작되거나 오류여야 함).
+    static let startWatchdog: TimeInterval = 3
+
+    /// 실행 중인 앱의 Bundle ID와 Info.plist의 허용 식별자 (재서명 도구가 Bundle ID를 바꿨는지 확인용).
+    static var runtimeBundleID: String { Bundle.main.bundleIdentifier ?? "?" }
+    static var permittedPatterns: [String] {
+        Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
+    }
+    /// 허용 식별자가 현재 Bundle ID 아래에 있는지. 아니면 iOS가 작업을 받아 놓고 실행하지 않는다 (SideStore #1475).
+    static var permittedPatternsMatchBundle: Bool {
+        let prefix = runtimeBundleID + "."
+        return permittedPatterns.contains { $0.hasPrefix(prefix) }
+    }
     private var task: BGContinuedProcessingTask?
     private var heartbeatCount: Int64 = 0
 
@@ -85,6 +98,7 @@ final class BackgroundTaskManager {
             try BGTaskScheduler.shared.submit(request)
             self.identifier = identifier
             status = .submitted
+            scheduleStartWatchdog(for: identifier)
             return true
         } catch {
             status = .failed(Self.describe(error))
@@ -116,6 +130,23 @@ final class BackgroundTaskManager {
         identifier = nil
         heartbeatCount = 0
         status = .inactive
+    }
+
+    private func scheduleStartWatchdog(for submitted: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.startWatchdog) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.status == .submitted, self.identifier == submitted else { return }
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: submitted)
+                self.identifier = nil
+                let reason: String
+                if !Self.permittedPatternsMatchBundle {
+                    reason = "Bundle ID(\(Self.runtimeBundleID))가 Info.plist 허용 식별자(\(Self.permittedPatterns.joined(separator: ", ")))와 맞지 않음. 재서명 시 Bundle ID 변경을 끄고 삭제→재부팅→재설치"
+                } else {
+                    reason = "제출은 됐지만 iOS가 \(Int(Self.startWatchdog))초 안에 시작하지 않음 (Apple 알려진 문제 FB21052216 가능)"
+                }
+                self.status = .failed(reason)
+            }
+        }
     }
 
     private func attach(_ task: BGContinuedProcessingTask) {

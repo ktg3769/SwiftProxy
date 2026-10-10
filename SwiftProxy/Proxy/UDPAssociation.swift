@@ -115,10 +115,19 @@ final class UDPAssociation {
                 }
             }
             if count < 0 { return }   // EAGAIN: 더 읽을 데이터 없음
-            guard let sender = SocketAddress.string(from), IPParser.bytes(sender) == clientAddress else { continue }
+            guard let sender = SocketAddress.string(from), let senderBytes = IPParser.bytes(sender),
+                  Self.isSameClient(senderBytes, clientAddress) else { continue }
             clientSockaddr = from
             handleClientDatagram(Array(buffer[0..<count]))
         }
+    }
+
+    /// IPv4는 주소가 같아야 하고, IPv6는 같은 /64면 같은 기기로 본다.
+    /// IPv6 기기는 임시 주소를 포함해 주소를 여러 개 쓰므로 TCP 제어 연결과 UDP의 출발 주소가 다를 수 있다.
+    static func isSameClient(_ sender: [UInt8], _ client: [UInt8]) -> Bool {
+        guard sender.count == client.count else { return false }
+        if sender.count == 16 { return sender[0..<8] == client[0..<8] }
+        return sender == client
     }
 
     private func handleClientDatagram(_ bytes: [UInt8]) {

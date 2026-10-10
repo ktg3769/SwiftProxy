@@ -53,3 +53,19 @@ final class SettingsMigrationTests: XCTestCase {
         XCTAssertEqual(decoded, s)
     }
 }
+
+final class UDPClientMatchTests: XCTestCase {
+    func testIPv6SamePrefixMatches() {
+        let a = IPParser.bytes("2001:2d8:8214:7a20:1111:2222:3333:4444")!
+        let b = IPParser.bytes("2001:2d8:8214:7a20:aaaa:bbbb:cccc:dddd")!
+        let c = IPParser.bytes("2001:2d8:9999:7a20:1111:2222:3333:4444")!
+        XCTAssertTrue(UDPAssociation.isSameClient(a, b))
+        XCTAssertFalse(UDPAssociation.isSameClient(a, c))
+    }
+
+    func testIPv4MustMatchExactly() {
+        XCTAssertTrue(UDPAssociation.isSameClient([172, 20, 10, 2], [172, 20, 10, 2]))
+        XCTAssertFalse(UDPAssociation.isSameClient([172, 20, 10, 2], [172, 20, 10, 3]))
+        XCTAssertFalse(UDPAssociation.isSameClient([172, 20, 10, 2], IPParser.bytes("::1")!))
+    }
+}

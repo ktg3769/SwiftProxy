@@ -57,6 +57,18 @@ struct DiagnosticsView: View {
                     Text(copied ? "복사했습니다. 그대로 붙여넣어 공유하세요." : "연결 수락, 요청 대상, 대상 연결 성공/실패, 백그라운드 전환이 기록됩니다. 클라이언트 IP는 일부 가려집니다.")
                 }
 
+                Section {
+                    LabeledContent("상태", value: app.backgroundStatus.title)
+                    LabeledContent("Bundle ID", value: BackgroundTaskManager.runtimeBundleID)
+                    LabeledContent("허용 식별자", value: BackgroundTaskManager.permittedPatterns.joined(separator: "\n"))
+                    LabeledContent("Bundle ID 일치",
+                                   value: BackgroundTaskManager.permittedPatternsMatchBundle ? "예" : "아니오 (작업이 실행되지 않음)")
+                } header: {
+                    Text("백그라운드 작업")
+                } footer: {
+                    Text("허용 식별자가 현재 Bundle ID로 시작하지 않으면 iOS는 작업을 받기만 하고 실행하지 않습니다. 재서명 앱(ESign 등)에서 Bundle ID를 바꿔 서명하면 이렇게 됩니다.")
+                }
+
                 Section("버전") {
                     LabeledContent("앱", value: Self.appVersion)
                     LabeledContent("iOS", value: UIDevice.current.systemVersion)

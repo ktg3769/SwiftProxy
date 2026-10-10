@@ -46,6 +46,8 @@ final class ProxyServerManager: @unchecked Sendable {
     private var handlers: [UUID: ProxyConnectionHandler] = [:]
     private var boundPorts: [ListenerKind: Int] = [:]
     private var tickTimer: DispatchSourceTimer?
+    /// start/stop마다 증가. 예약된 재시도가 이미 지난 세대의 것이면 무시한다.
+    private var generation = 0
 
     init(makeHandler: @escaping HandlerFactory, onEvent: @escaping @Sendable (ProxyEvent) -> Void) {
         self.makeHandler = makeHandler
@@ -107,6 +109,7 @@ final class ProxyServerManager: @unchecked Sendable {
 
     private func startOnQueue(_ configuration: Configuration) {
         stopOnQueue()
+        generation += 1
         config = configuration
         counter.reset()
 
@@ -138,6 +141,7 @@ final class ProxyServerManager: @unchecked Sendable {
     }
 
     private func stopOnQueue() {
+        generation += 1
         tickTimer?.cancel()
         tickTimer = nil
         boundPorts.removeAll()
@@ -157,13 +161,18 @@ final class ProxyServerManager: @unchecked Sendable {
         config = nil
     }
 
-    private func startListener(_ kind: ListenerKind, port: Int) {
+    /// 이전 리스너 소켓은 디스패치 소스 취소 핸들러에서 비동기로 닫히므로, 다시 열 때 잠깐 EADDRINUSE가 날 수 있다.
+    /// 그 경우 짧게 기다렸다 다시 시도한다 (최대 약 3초).
+    private static let bindRetryLimit = 15
+    private static let bindRetryDelay: DispatchTimeInterval = .milliseconds(200)
+
+    private func startListener(_ kind: ListenerKind, port: Int, attempt: Int = 0) {
         // port 0은 테스트용: 시스템이 빈 포트를 고른다. 앱 설정에서는 1024 이상만 허용된다.
         guard config != nil, (0...65535).contains(port) else {
             emit(.listener(kind, .failed("잘못된 포트")))
             return
         }
-        emit(.listener(kind, .starting))
+        if attempt == 0 { emit(.listener(kind, .starting)) }
         do {
             let listener = try SocketListener(port: UInt16(port), queue: queue) { [weak self] transport in
                 self?.accept(transport, kind: kind)
@@ -174,6 +183,14 @@ final class ProxyServerManager: @unchecked Sendable {
             emit(.listener(kind, .ready(port: Int(listener.port))))
             emit(.log(.info, "\(kind.title) 리스너 시작: 0.0.0.0:\(listener.port)"))
         } catch {
+            if let nwError = error as? NWError, case .posix(.EADDRINUSE) = nwError, attempt < Self.bindRetryLimit {
+                let scheduledGeneration = generation
+                queue.asyncAfter(deadline: .now() + Self.bindRetryDelay) { [weak self] in
+                    guard let self, self.generation == scheduledGeneration, self.config != nil else { return }
+                    self.startListener(kind, port: port, attempt: attempt + 1)
+                }
+                return
+            }
             let message = Self.describe(error, port: port)
             emit(.listener(kind, .failed(message)))
             emit(.log(.error, "\(kind.title) 리스너 실패: \(message)"))
