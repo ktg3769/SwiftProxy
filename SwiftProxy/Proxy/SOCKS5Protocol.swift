@@ -184,7 +184,8 @@ enum SOCKS5 {
             return .done(.failure(.unsupportedAddressType(atyp)), consumed: b.count)
         }
         let port = UInt16(b[addressEnd]) << 8 | UInt16(b[addressEnd + 1])
-        guard port != 0 else {
+        // UDP ASSOCIATE는 클라이언트가 0.0.0.0:0을 보내는 것이 일반적이므로 포트 0은 CONNECT에서만 거부한다.
+        guard port != 0 || command == Command.udpAssociate else {
             return .done(.failure(.malformed("포트 0은 사용할 수 없습니다")), consumed: addressEnd + 2)
         }
         return .done(.success(Request(command: command, host: host, port: port)), consumed: addressEnd + 2)

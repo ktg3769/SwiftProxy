@@ -71,6 +71,14 @@ final class SOCKS5ParserTests: XCTestCase {
         guard case .invalid = SOCKS5.parseRequest([4, 1, 0, 1, 1, 2, 3, 4, 0, 80]) else { return XCTFail() }
     }
 
+    func testUDPAssociateAllowsZeroAddress() {
+        guard case .done(.success(let r), _) = SOCKS5.parseRequest([5, 3, 0, 1, 0, 0, 0, 0, 0, 0]) else {
+            return XCTFail("UDP ASSOCIATE with 0.0.0.0:0 must be accepted")
+        }
+        XCTAssertEqual(r.command, SOCKS5.Command.udpAssociate)
+        XCTAssertEqual(r.port, 0)
+    }
+
     func testBindCommandParsesButIsDistinguishable() {
         guard case .done(.success(let r), _) = SOCKS5.parseRequest([5, 2, 0, 1, 1, 2, 3, 4, 0, 80]) else {
             return XCTFail()
