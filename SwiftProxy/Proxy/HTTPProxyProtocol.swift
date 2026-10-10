@@ -20,7 +20,7 @@ enum HTTPProxy {
         }
     }
 
-    enum HeadError: Equatable {
+    enum HeadError: Error, Equatable {
         case tooLarge
         case malformed(String)
     }

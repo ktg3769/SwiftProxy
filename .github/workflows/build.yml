@@ -19,7 +19,7 @@ jobs:
       BUNDLE_ID: com.taegun.swiftproxy
       SCHEME: SwiftProxy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Toolchain versions
         run: |
@@ -95,7 +95,7 @@ jobs:
         run: bash scripts/verify_ipa.sh "build/$APP_NAME-unsigned.ipa" "$BUNDLE_ID" "$APP_NAME"
 
       - name: Upload IPA
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ env.APP_NAME }}-unsigned-ipa
           path: build/${{ env.APP_NAME }}-unsigned.ipa
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-results
           path: build/TestResults.xcresult

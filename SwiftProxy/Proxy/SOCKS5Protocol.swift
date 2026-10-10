@@ -121,7 +121,7 @@ enum SOCKS5 {
     }
 
     /// 요청은 구조상 올바르지만 처리할 수 없는 경우 (reply 코드를 돌려줘야 함).
-    enum RequestError: Equatable {
+    enum RequestError: Error, Equatable {
         case malformed(String)
         case unsupportedAddressType(UInt8)
     }
