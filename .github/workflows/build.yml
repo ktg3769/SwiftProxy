@@ -92,7 +92,7 @@ jobs:
           (cd build/ipa && zip -qry "../$APP_NAME-unsigned.ipa" Payload)
 
       - name: Verify IPA structure
-        run: bash scripts/verify_ipa.sh "build/$APP_NAME-unsigned.ipa" "$BUNDLE_ID" "$APP_NAME"
+        run: bash scripts/verify_ipa.sh "build/$APP_NAME-unsigned.ipa" "$BUNDLE_ID" "$APP_NAME" SwiftProxyLiveActivity
 
       - name: Upload IPA
         uses: actions/upload-artifact@v5
@@ -107,12 +107,28 @@ jobs:
       - name: Summarize failures
         if: failure()
         run: |
-          SUMMARY=$(cat build/*.log 2>/dev/null \
-            | grep -E "error:|: failed|Test Case .* failed|XCTAssert|Fatal error|\*\* (TEST|ARCHIVE) FAILED" \
-            | sed -E 's#^/Users/runner/work/[^/]+/[^/]+/##' \
-            | awk '!seen[$0]++' | head -60 | cut -c1-400)
-          if [ -n "$SUMMARY" ]; then
-            ENCODED=$(printf '%s' "$SUMMARY" | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          {
+            cat build/*.log 2>/dev/null \
+              | grep -E "error:|: failed|Test Case .* failed|Fatal error|crash|Restarting after|\*\* (TEST|ARCHIVE) FAILED" \
+              | sed -E 's#^/Users/runner/work/[^/]+/[^/]+/##'
+            if [ -d build/TestResults.xcresult ]; then
+              xcrun xcresulttool get test-results summary --path build/TestResults.xcresult --format json 2>/dev/null \
+                | python3 -c '
+          import json, sys
+          try:
+              d = json.load(sys.stdin)
+          except Exception as e:
+              print("xcresult parse failed:", e); sys.exit(0)
+          print("tests: passed=%s failed=%s skipped=%s" % (d.get("passedTests"), d.get("failedTests"), d.get("skippedTests")))
+          for f in d.get("testFailures", []):
+              print("FAIL", f.get("testIdentifierString") or f.get("testName"), "->", (f.get("failureText") or "").replace("\n", " ")[:300])
+          '
+            fi
+            echo "--- tail of test.log ---"
+            tail -n 15 build/test.log 2>/dev/null
+          } | awk '!seen[$0]++' | head -80 | cut -c1-400 > build/summary.txt
+          if [ -s build/summary.txt ]; then
+            ENCODED=$(sed -e 's/%/%25/g' build/summary.txt | awk '{printf "%s%%0A", $0}')
             echo "::error title=Build/test failures::${ENCODED}"
           fi
 
