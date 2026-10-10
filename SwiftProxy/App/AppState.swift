@@ -70,6 +70,9 @@ final class AppState {
             self?.log.add(status == .running || status == .inactive ? .info : .warning,
                           "백그라운드 작업 상태: \(status.title)")
         }
+        backgroundTasks.onWarning = { [weak self] message in
+            self?.log.add(.warning, message)
+        }
         backgroundTasks.onExpiration = { [weak self] in
             self?.backgroundTaskExpired()
         }
@@ -125,9 +128,8 @@ final class AppState {
         // 셀룰러로 실제 연결을 한 번 만들어 iOS 설정 > 셀룰러 목록에 등록되게 하고, 결과를 진단에 표시한다.
         runOutboundTest()
         if settingsStore.settings.autoStart {
-            log.add(.info, "자동 시작")
-            // 사용자가 앱을 직접 연 시점(포그라운드)이므로 백그라운드 작업도 함께 요청한다.
-            start(userInitiated: true)
+            log.add(.info, "자동 시작: 백그라운드 작업은 버튼을 눌러야 요청됩니다 (버튼이 아닌 제출은 iOS가 취소함).")
+            start(userInitiated: false)
         }
     }
 
@@ -157,10 +159,6 @@ final class AppState {
         if suspendedWithoutBackgroundTask {
             suspendedWithoutBackgroundTask = false
             reopenListeners()
-        }
-        // 백그라운드 작업이 없으면 포그라운드인 지금 다시 요청한다.
-        if !backgroundTasks.isActive && settingsStore.settings.useContinuedProcessing {
-            requestBackgroundTask()
         }
         pushHeartbeat(force: true)
     }

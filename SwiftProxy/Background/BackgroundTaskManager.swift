@@ -41,12 +41,13 @@ final class BackgroundTaskManager {
     }
 
     var onStatusChange: ((Status) -> Void)?
+    var onWarning: ((String) -> Void)?
     /// 시스템 또는 사용자가 작업을 끝냈을 때. 호출된 쪽은 서버를 정리해야 한다.
     var onExpiration: (() -> Void)?
 
     private var identifier: String?
     /// 제출 후 이 시간 안에 시작되지 않으면 실패로 본다 (Apple: .fail은 즉시 시작되거나 오류여야 함).
-    static let startWatchdog: TimeInterval = 3
+    static let startWatchdog: TimeInterval = 15
 
     /// 실행 중인 앱의 Bundle ID와 Info.plist의 허용 식별자 (재서명 도구가 Bundle ID를 바꿨는지 확인용).
     static var runtimeBundleID: String { Bundle.main.bundleIdentifier ?? "?" }
@@ -66,13 +67,8 @@ final class BackgroundTaskManager {
     /// 사용자가 시작 버튼을 눌렀을 때(앱이 포그라운드일 때)만 호출해야 한다.
     func begin(subtitle: String) {
         guard !isActive else { return }   // 중복 제출 방지
-        // 바로 시작을 먼저 시도하고, 시스템이 바로 받을 수 없으면 대기열 방식으로 다시 요청한다.
-        if submit(subtitle: subtitle, strategy: .fail) { return }
-        let firstFailure = status
-        if submit(subtitle: subtitle, strategy: .queue) { return }
-        if case .failed(let first) = firstFailure, case .failed(let second) = status, first != second {
-            status = .failed("\(first) / 대기열 요청: \(second)")
-        }
+        // 실기기에서 동작이 확인된 구현들은 .queue를 명시한다. .fail은 "받아들여졌지만 시작되지 않는" 사례가 보고되어 쓰지 않는다.
+        _ = submit(subtitle: subtitle, strategy: .queue)
     }
 
     private func submit(subtitle: String, strategy: BGContinuedProcessingTaskRequest.SubmissionStrategy) -> Bool {
@@ -112,7 +108,9 @@ final class BackgroundTaskManager {
         guard let task else { return }
         heartbeatCount += 1
         let progress = task.progress
-        progress.totalUnitCount = heartbeatCount + 1
+        // 완료 단위는 계속 늘리고(진행 중임을 알림), 전체는 그 두 배 이상으로 잡아 진행률이 50% 근처에 머물게 한다.
+        // 진행률이 100%에 가까운데 작업이 남아 있으면 시스템이 빨리 만료시킨다는 보고가 있다.
+        progress.totalUnitCount = heartbeatCount * 2 + 100
         progress.completedUnitCount = heartbeatCount
         task.updateTitle(Self.title, subtitle: subtitle)
     }
@@ -136,15 +134,12 @@ final class BackgroundTaskManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.startWatchdog) { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.status == .submitted, self.identifier == submitted else { return }
-                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: submitted)
-                self.identifier = nil
-                let reason: String
+                // 요청은 취소하지 않는다 (.queue는 조금 늦게 시작될 수 있음). 원인 판단에 필요한 정보만 알린다.
                 if !Self.permittedPatternsMatchBundle {
-                    reason = "Bundle ID(\(Self.runtimeBundleID))가 Info.plist 허용 식별자(\(Self.permittedPatterns.joined(separator: ", ")))와 맞지 않음. 재서명 시 Bundle ID 변경을 끄고 삭제→재부팅→재설치"
+                    self.onWarning?("백그라운드 작업이 시작되지 않음: Bundle ID(\(Self.runtimeBundleID))가 허용 식별자(\(Self.permittedPatterns.joined(separator: ", ")))와 맞지 않습니다.")
                 } else {
-                    reason = "제출은 됐지만 iOS가 \(Int(Self.startWatchdog))초 안에 시작하지 않음 (Apple 알려진 문제 FB21052216 가능)"
+                    self.onWarning?("백그라운드 작업이 \(Int(Self.startWatchdog))초가 지나도 시작되지 않았습니다 (대기열에서 대기 중).")
                 }
-                self.status = .failed(reason)
             }
         }
     }
@@ -152,8 +147,8 @@ final class BackgroundTaskManager {
     private func attach(_ task: BGContinuedProcessingTask) {
         self.task = task
         heartbeatCount = 0
-        task.progress.totalUnitCount = 1
-        task.progress.completedUnitCount = 0
+        task.progress.totalUnitCount = 100
+        task.progress.completedUnitCount = 1
         task.expirationHandler = { [weak self] in
             Task { @MainActor [weak self] in self?.expired() }
         }
