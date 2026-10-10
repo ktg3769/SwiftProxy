@@ -22,6 +22,9 @@ targets:
     platform: iOS
     sources:
       - path: SwiftProxy
+      - path: Shared
+    dependencies:
+      - target: SwiftProxyLiveActivity
     info:
       path: SwiftProxy/Info.plist
       properties:
@@ -38,6 +41,10 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSLocalNetworkUsageDescription: "같은 네트워크의 다른 기기가 이 iPhone의 SOCKS5/HTTP 프록시에 접속하려면 로컬 네트워크 접근 권한이 필요합니다."
+        NSSupportsLiveActivities: true
+        # iOS 26 BGContinuedProcessingTask: 세션마다 이 접두사 + UUID 식별자를 등록한다.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.taegun.swiftproxy.proxy.*
         CFBundleURLTypes:
           - CFBundleURLName: com.taegun.swiftproxy
             CFBundleURLSchemes:
@@ -48,6 +55,32 @@ targets:
         PRODUCT_NAME: SwiftProxy
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: SwiftProxy/Info.plist
+
+  SwiftProxyLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: SwiftProxyLiveActivity
+      - path: Shared
+    info:
+      path: SwiftProxyLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: SwiftProxy
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundlePackageType: XPC!
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.taegun.swiftproxy.LiveActivity
+        PRODUCT_NAME: SwiftProxyLiveActivity
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: SwiftProxyLiveActivity/Info.plist
+        SKIP_INSTALL: YES
 
   SwiftProxyTests:
     type: bundle.unit-test

@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct SwiftProxyApp: App {
     @State private var appState = AppState()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -10,6 +11,13 @@ struct SwiftProxyApp: App {
                 .environment(appState)
                 .preferredColorScheme(.dark)
                 .task { appState.onLaunch() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background: appState.sceneDidEnterBackground()
+            case .active: appState.sceneDidBecomeActive()
+            default: break
+            }
         }
     }
 }

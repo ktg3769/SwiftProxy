@@ -49,6 +49,15 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("백그라운드 작업 사용 (iOS 26)", isOn: $draft.useContinuedProcessing)
+                    Toggle("Live Activity 표시", isOn: $draft.showLiveActivity)
+                } header: {
+                    Text("백그라운드 · Live Activity")
+                } footer: {
+                    Text("백그라운드 작업은 시작 버튼을 직접 눌렀을 때만 요청됩니다(자동 시작 시에는 요청되지 않음). 이 작업이 시스템 Live Activity를 따로 표시하므로, 앱 자체 Live Activity와 함께 두 개가 보일 수 있습니다. Live Activity 표시 자체는 서버를 살려 두지 않습니다.")
+                }
+
+                Section {
                     Toggle("앱 실행 시 자동 시작", isOn: $draft.autoStart)
                     Picker("로그 수준", selection: $draft.logLevel) {
                         ForEach(LogLevel.allCases) { Text($0.title).tag($0) }

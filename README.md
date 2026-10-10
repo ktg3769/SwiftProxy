@@ -2,8 +2,19 @@
 
 iPhone에서 SOCKS5 / HTTP 프록시 서버를 실행하는 개인용 iOS 앱 (iOS 26 이상).
 
-> 개발 중입니다. 현재 Phase 2: UI·상태·설정·리스너 골격까지 구현되어 있고,
-> **SOCKS5/HTTP 프로토콜 처리는 아직 없습니다** (들어온 연결은 즉시 닫힙니다).
+> 개인용으로 개발 중입니다. 실기기 검증 전이므로 아래 기능은 CI(시뮬레이터) 테스트 기준입니다.
+
+## 기능
+
+- SOCKS5 CONNECT (IPv4 / IPv6 / 도메인), 사용자 이름·비밀번호 인증 (RFC 1929)
+- HTTP 포워드 프록시, HTTP CONNECT 터널, Basic 프록시 인증
+- PAC 파일: `http://<iPhone IP>:<HTTP 포트>/proxy.pac` (또는 `/wpad.dat`)
+- 연결별 통계, 연결 강제 종료, 유휴(5분)·핸드셰이크(15초) 시간 초과
+- 외부 연결 경로 선택: 시스템 기본 / 셀룰러만
+- iOS 26 BGContinuedProcessingTask로 백그라운드 실행 (앱 쪽 시간 제한 없음, 시스템이 종료할 수 있음)
+- 잠금 화면·다이나믹 아일랜드 Live Activity
+
+백그라운드 실행의 한계는 [docs/LIMITATIONS.md](docs/LIMITATIONS.md)를 꼭 읽어 주세요.
 
 ## 빌드
 
@@ -32,6 +43,10 @@ SwiftProxy/Proxy            리스너·연결 관리 (ProxyServerManager)
 SwiftProxy/Network          NWPathMonitor, 인터페이스 주소
 SwiftProxy/Services         설정 저장, Keychain, 접근 제어, 통계, 로그
 SwiftProxy/Models           설정·상태 모델
+SwiftProxy/Background       BGContinuedProcessingTask, 세션 기록
+SwiftProxy/LiveActivity     Live Activity 시작·갱신·종료
+SwiftProxyLiveActivity      위젯 확장 (잠금 화면, 다이나믹 아일랜드)
+Shared                      앱과 위젯이 함께 쓰는 코드
 SwiftProxyTests             단위 테스트
 scripts/verify_ipa.sh       IPA 구조 검증
 ```
@@ -45,5 +60,7 @@ scripts/verify_ipa.sh       IPA 구조 검증
 
 ## 알려진 제한
 
-백그라운드 실행 제한과 BGContinuedProcessingTask 동작은 Phase 4에서 정리합니다.
-현재 버전은 앱이 백그라운드로 가면 iOS가 프로세스를 일시 중지하므로 서버도 멈춥니다.
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md) 참고. 요약:
+- 백그라운드 실행은 BGContinuedProcessingTask에 의존하며, 사용자 취소·자원 부족·앱 스위처 종료 시 멈춥니다.
+- Live Activity는 표시일 뿐 서버를 살려 두지 않습니다 (갱신이 끊기면 "확인 불가"로 표시).
+- SOCKS5 BIND/UDP, SOCKS4, HTTP keep-alive 재사용은 지원하지 않습니다.

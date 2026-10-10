@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Verify that an IPA has the layout ESign / sideloading tools expect:
 #   Payload/<AppName>.app/...  (exactly one top-level .app, no nesting, non-empty, right bundle id)
-# Usage: verify_ipa.sh <ipa> <expected-bundle-id> <app-name>
+# Usage: verify_ipa.sh <ipa> <expected-bundle-id> <app-name> [required-appex-name ...]
 set -euo pipefail
 
 IPA="$1"
 EXPECTED_ID="$2"
 APP_NAME="$3"
+shift 3
+REQUIRED_APPEX=("$@")
 
 fail() { echo "::error::IPA check failed: $*"; exit 1; }
 
@@ -51,6 +53,17 @@ VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST
 [ "$BUNDLE_ID" = "$EXPECTED_ID" ] || fail "bundle id is '$BUNDLE_ID', expected '$EXPECTED_ID'"
 [ -f "$APP/$EXECUTABLE" ] || fail "executable '$EXECUTABLE' missing"
 file "$APP/$EXECUTABLE" | grep -q 'Mach-O 64-bit executable arm64' || fail "executable is not an arm64 Mach-O: $(file "$APP/$EXECUTABLE")"
+
+for EXT in "${REQUIRED_APPEX[@]+"${REQUIRED_APPEX[@]}"}"; do
+  EXT_DIR="$APP/PlugIns/$EXT.appex"
+  [ -d "$EXT_DIR" ] || fail "app extension $EXT.appex missing from PlugIns/"
+  EXT_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT_DIR/Info.plist")
+  case "$EXT_ID" in
+    "$EXPECTED_ID".*) ;;
+    *) fail "extension bundle id '$EXT_ID' is not prefixed by '$EXPECTED_ID.'" ;;
+  esac
+  echo "  extension:   $EXT.appex ($EXT_ID)"
+done
 
 if codesign -dv "$APP" >/dev/null 2>&1; then
   SIGNED="signed (unexpected for this build)"

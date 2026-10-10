@@ -20,11 +20,23 @@ final class AppState {
     private(set) var connections: [UUID: ConnectionInfo] = [:]
     private(set) var lastError: String?
     private(set) var lanAddresses: [InterfaceAddress] = []
+    private(set) var backgroundStatus: BackgroundTaskManager.Status = .inactive
+    private(set) var isInBackground = false
+    /// 이전 세션이 비정상 종료되었거나 시스템이 백그라운드 작업을 끝낸 경우의 안내.
+    private(set) var sessionNotice: String?
 
     @ObservationIgnored private var server: ProxyServerManager!
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private var rateCalculator = RateCalculator()
     @ObservationIgnored private var didLaunch = false
+    @ObservationIgnored private let backgroundTasks = BackgroundTaskManager()
+    @ObservationIgnored private let liveActivity = LiveActivityManager()
+    @ObservationIgnored private var journal = SessionJournal()
+    @ObservationIgnored private var graceTask: UIBackgroundTaskIdentifier = .invalid
+    @ObservationIgnored private var lastHeartbeat = Date.distantPast
+
+    /// BGContinuedProcessingTask 진행률·Live Activity 갱신 간격.
+    static let heartbeatInterval: TimeInterval = 5
 
     init() {
         let settingsStore = SettingsStore()
@@ -33,14 +45,26 @@ final class AppState {
         self.log = LogStore()
         self.log.minimumLevel = settingsStore.settings.logLevel
 
+        // 이벤트 순서를 보장하기 위해 Task 대신 main 큐에 순서대로 넣는다.
         self.server = ProxyServerManager(
             makeHandler: ProxyHandlerFactory.make,
             onEvent: { [weak self] event in
-                Task { @MainActor [weak self] in self?.handle(event) }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.handle(event) }
+                }
             })
 
         pathMonitor.onChange = { [weak self] snapshot in
             self?.networkChanged(snapshot)
+        }
+        backgroundTasks.onStatusChange = { [weak self] status in
+            self?.backgroundStatus = status
+        }
+        backgroundTasks.onExpiration = { [weak self] in
+            self?.backgroundTaskExpired()
+        }
+        liveActivity.onError = { [weak self] message in
+            self?.log.add(.warning, message)
         }
     }
 
@@ -63,22 +87,59 @@ final class AppState {
         return "중지됨"
     }
 
+    var backgroundModeTitle: String {
+        if !runRequested { return "중지됨" }
+        if backgroundTasks.status == .running { return isInBackground ? "백그라운드 작업 실행 중" : "포그라운드 (백그라운드 작업 준비됨)" }
+        if isInBackground { return graceTask != .invalid ? "백그라운드 유예 중 (곧 중지)" : "백그라운드" }
+        return "포그라운드"
+    }
+
     // MARK: - Lifecycle
 
     func onLaunch() {
         guard !didLaunch else { return }
         didLaunch = true
+        LiveActivityManager.endLeftoverActivities()
+        if let notice = journal.consumeUncleanShutdown() {
+            sessionNotice = notice
+            log.add(.warning, notice)
+        }
         pathMonitor.start()
         refreshAddresses()
         if settingsStore.settings.autoStart {
-            log.add(.info, "자동 시작 설정에 따라 서버를 시작합니다.")
-            start()
+            log.add(.info, "자동 시작: 백그라운드 작업은 시작 버튼을 직접 눌렀을 때만 요청됩니다.")
+            start(userInitiated: false)
         }
     }
 
+    func sceneDidEnterBackground() {
+        isInBackground = true
+        guard runRequested else { return }
+        if backgroundTasks.status == .running {
+            log.add(.info, "백그라운드 전환: BGContinuedProcessingTask로 계속 실행")
+            pushHeartbeat(force: true)
+            return
+        }
+        // 백그라운드 작업이 없으면 짧은 유예 시간 동안만 실행되고 그 뒤 iOS가 앱을 일시 중지한다.
+        // 일시 중지 상태에서는 연결을 처리할 수 없으므로, 유예가 끝나기 전에 서버를 정상 종료한다.
+        log.add(.warning, "백그라운드 작업 없이 백그라운드로 전환됨: 유예 시간이 끝나면 서버를 중지합니다.")
+        beginGracePeriod()
+        pushHeartbeat(force: true)
+    }
+
+    func sceneDidBecomeActive() {
+        isInBackground = false
+        endGracePeriod()
+        refreshAddresses()
+        if runRequested { pushHeartbeat(force: true) }
+    }
+
+    func dismissNotice() { sessionNotice = nil }
+
     // MARK: - Control
 
-    func start() {
+    /// - Parameter userInitiated: 사용자가 버튼을 눌렀는지. BGContinuedProcessingTask는 이 경우에만 제출할 수 있다.
+    func start(userInitiated: Bool = true) {
         let settings = settingsStore.settings
         let errors = SettingsValidator.validate(settings)
         guard errors.isEmpty else {
@@ -106,8 +167,10 @@ final class AppState {
             outboundRoute: settings.outboundRoute)
 
         lastError = nil
+        sessionNotice = nil
         runRequested = true
-        startedAt = Date()
+        let now = Date()
+        startedAt = now
         connections.removeAll()
         totals = .init()
         rate = .zero
@@ -115,10 +178,27 @@ final class AppState {
         refreshAddresses()
         server.start(config)
         startStatsLoop()
+        journal.markStarted(at: now)
         log.add(.info, "서버 시작 요청")
+
+        if userInitiated && settings.useContinuedProcessing {
+            backgroundTasks.begin(subtitle: portSummary(settings))
+            if case .failed(let reason) = backgroundTasks.status {
+                log.add(.warning, "백그라운드 작업 요청 실패: \(reason). 앱이 포그라운드에 있는 동안만 실행됩니다.")
+            }
+        }
+        if settings.showLiveActivity {
+            liveActivity.start(
+                attributes: ProxyActivityAttributes(
+                    socksPort: settings.socksEnabled ? settings.socksPort : nil,
+                    httpPort: settings.httpEnabled ? settings.httpPort : nil,
+                    startedAt: now),
+                state: activityState())
+        }
     }
 
-    func stop() {
+    func stop(reason: String = "사용자가 중지") {
+        guard runRequested else { return }
         server.stop()
         runRequested = false
         startedAt = nil
@@ -128,13 +208,18 @@ final class AppState {
         rate = .zero
         socksStatus = .stopped
         httpStatus = .stopped
-        log.add(.info, "서버 중지")
+        backgroundTasks.end()
+        liveActivity.end(finalState: activityState())
+        journal.markEnded(reason: reason)
+        endGracePeriod()
+        log.add(.info, "서버 중지: \(reason)")
     }
 
+    /// 설정 변경 후 재시작. 설정 화면에서 저장 버튼을 누른 사용자 동작이므로 백그라운드 작업을 다시 요청한다.
     func restartIfRunning() {
         guard runRequested else { return }
-        stop()
-        start()
+        stop(reason: "설정 변경으로 재시작")
+        start(userInitiated: !isInBackground)
     }
 
     func closeConnection(_ id: UUID) { server.closeConnection(id) }
@@ -155,6 +240,76 @@ final class AppState {
         lanAddresses = InterfaceAddresses.lanAddresses()
     }
 
+    // MARK: - Background
+
+    private func backgroundTaskExpired() {
+        let reason = "시스템 또는 사용자가 백그라운드 작업을 종료함"
+        sessionNotice = "백그라운드 작업이 종료되어 서버를 중지했습니다. (사용자 취소 또는 시스템 자원 부족)"
+        log.add(.warning, reason)
+        stop(reason: reason)
+    }
+
+    private func beginGracePeriod() {
+        guard graceTask == .invalid else { return }
+        graceTask = UIApplication.shared.beginBackgroundTask(withName: "SwiftProxyGrace") { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.runRequested && self.backgroundTasks.status != .running {
+                    self.sessionNotice = "백그라운드 유예 시간이 끝나 서버를 중지했습니다. 백그라운드 실행에는 iOS 26 백그라운드 작업이 필요합니다."
+                    self.stop(reason: "백그라운드 유예 시간 종료")
+                }
+                self.endGracePeriod()
+            }
+        }
+    }
+
+    private func endGracePeriod() {
+        guard graceTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(graceTask)
+        graceTask = .invalid
+    }
+
+    private func pushHeartbeat(force: Bool = false) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastHeartbeat) >= Self.heartbeatInterval else { return }
+        lastHeartbeat = now
+        backgroundTasks.heartbeat(subtitle: heartbeatSubtitle())
+        liveActivity.update(activityState(), force: force)
+    }
+
+    private func heartbeatSubtitle() -> String {
+        var parts = ["연결 \(activeConnectionCount)"]
+        parts.append("↓\(Formatters.rate(rate.down))")
+        if let startedAt { parts.append(Formatters.duration(Date().timeIntervalSince(startedAt))) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func portSummary(_ s: ProxySettings) -> String {
+        var parts: [String] = []
+        if s.socksEnabled { parts.append("SOCKS5 :\(s.socksPort)") }
+        if s.httpEnabled { parts.append("HTTP :\(s.httpPort)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func activityState() -> ProxyActivityAttributes.ContentState {
+        let failure: String? = {
+            if case .failed(let r) = socksStatus { return "SOCKS5: \(r)" }
+            if case .failed(let r) = httpStatus { return "HTTP: \(r)" }
+            return nil
+        }()
+        return ProxyActivityAttributes.ContentState(
+            isRunning: isRunning,
+            connections: activeConnectionCount,
+            upRate: rate.up,
+            downRate: rate.down,
+            totalUp: totals.up,
+            totalDown: totals.down,
+            network: pathMonitor.current.summary,
+            error: failure,
+            backgroundMode: backgroundModeTitle,
+            updatedAt: Date())
+    }
+
     // MARK: - Events
 
     private func handle(_ event: ProxyEvent) {
@@ -169,6 +324,7 @@ final class AppState {
             if case .failed(let reason) = status {
                 lastError = "\(kind.title): \(reason)"
             }
+            if runRequested { pushHeartbeat(force: true) }
         case .connectionOpened(let info), .connectionUpdated(let info):
             guard runRequested else { return }
             connections[info.id] = info
@@ -183,6 +339,12 @@ final class AppState {
     private func networkChanged(_ snapshot: PathSnapshot) {
         refreshAddresses()
         log.add(.info, "네트워크 변경: \(snapshot.summary)")
+        if runRequested {
+            if lanAddresses.isEmpty {
+                log.add(.warning, "Wi-Fi/핫스팟 주소가 없어 다른 기기가 접속할 수 없습니다.")
+            }
+            pushHeartbeat(force: true)
+        }
     }
 
     private func startStatsLoop() {
@@ -202,5 +364,6 @@ final class AppState {
         let current = server.counter.totals()
         rate = rateCalculator.update(current, at: now)
         if current != totals { totals = current }
+        pushHeartbeat()
     }
 }

@@ -7,7 +7,26 @@ struct DashboardView: View {
     var body: some View {
         NavigationStack {
             List {
+                if let notice = app.sessionNotice {
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(notice, systemImage: "info.circle.fill")
+                                .foregroundStyle(.orange)
+                                .font(.callout)
+                            Button("확인") { app.dismissNotice() }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
                 statusSection
+                Section {
+                    LabeledContent("실행 방식", value: app.backgroundModeTitle)
+                    LabeledContent("백그라운드 작업", value: app.backgroundStatus.title)
+                } header: {
+                    Text("백그라운드")
+                } footer: {
+                    Text("iOS 26 백그라운드 작업(BGContinuedProcessingTask)이 실행 중이면 앱을 나가도 서버가 계속 동작합니다. 앱이 정한 시간 제한은 없지만, 시스템 Live Activity에서 취소하거나 자원이 부족하거나 앱 스위처에서 앱을 종료하면 서버가 멈춥니다.")
+                }
                 if let error = app.lastError {
                     Section("오류") {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
