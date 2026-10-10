@@ -61,6 +61,12 @@ struct ProxySettings: Codable, Equatable, Sendable {
     var logLevel: LogLevel = .info
     /// 통계 갱신 주기(초).
     var statsInterval: Double = 1.0
+    /// 프록시가 대상 서버로 나가는 연결의 경로.
+    var outboundRoute: OutboundRoute = .system
+    /// 시작 버튼을 누를 때 BGContinuedProcessingTask를 제출할지 여부.
+    var useContinuedProcessing: Bool = true
+    /// 앱 자체 Live Activity(잠금 화면·다이나믹 아일랜드) 표시 여부.
+    var showLiveActivity: Bool = true
 
     static let portRange = 1024...65535
     static let statsIntervalRange = 0.5...10.0
@@ -82,6 +88,25 @@ struct ProxySettings: Codable, Equatable, Sendable {
         authUsername = try c.decodeIfPresent(String.self, forKey: .authUsername) ?? d.authUsername
         logLevel = try c.decodeIfPresent(LogLevel.self, forKey: .logLevel) ?? d.logLevel
         statsInterval = try c.decodeIfPresent(Double.self, forKey: .statsInterval) ?? d.statsInterval
+        outboundRoute = try c.decodeIfPresent(OutboundRoute.self, forKey: .outboundRoute) ?? d.outboundRoute
+        useContinuedProcessing = try c.decodeIfPresent(Bool.self, forKey: .useContinuedProcessing) ?? d.useContinuedProcessing
+        showLiveActivity = try c.decodeIfPresent(Bool.self, forKey: .showLiveActivity) ?? d.showLiveActivity
+    }
+}
+
+enum OutboundRoute: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// iOS가 고른 기본 경로 (Wi-Fi가 연결되어 있으면 보통 Wi-Fi).
+    case system
+    /// NWParameters.requiredInterfaceType = .cellular. 셀룰러가 없으면 연결이 실패한다.
+    case cellularOnly
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: return "시스템 기본"
+        case .cellularOnly: return "셀룰러만"
+        }
     }
 }
 

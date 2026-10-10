@@ -1,12 +1,13 @@
 import Foundation
 import Network
 
-/// 개별 클라이언트 연결을 처리하는 객체 (Phase 3에서 SOCKS5/HTTP 구현이 이 프로토콜을 따른다).
-/// 모든 메서드는 ProxyServerManager.queue 위에서 호출된다.
+/// 개별 클라이언트 연결을 처리하는 객체. 모든 메서드는 ProxyServerManager.queue 위에서 호출된다.
 protocol ProxyConnectionHandler: AnyObject {
     var id: UUID { get }
     func start()
     func cancel()
+    /// 주기적으로 호출된다. 타임아웃을 검사하고, 지난 호출 이후 바뀐 연결 정보가 있으면 돌려준다.
+    func tick(now: TimeInterval) -> ConnectionInfo?
 }
 
 /// 리스너와 연결의 수명을 관리한다.
@@ -19,8 +20,14 @@ final class ProxyServerManager: @unchecked Sendable {
         var allowList: [IPAddressRange]
         var credentials: ProxyCredentials?
         var revealAddressesInLogs: Bool
+        var outboundRoute: OutboundRoute = .system
+        /// iPhone 자신(127.0.0.1, ::1, localhost)으로의 프록시 허용 여부. 앱에서는 항상 false, 테스트에서만 true.
+        var allowLoopbackTargets: Bool = false
         var maxConnections: Int = 256
     }
+
+    /// 연결 정보 갱신과 타임아웃 검사 주기. 연결마다 타이머를 두지 않고 이 타이머 하나로 처리한다.
+    static let tickInterval: DispatchTimeInterval = .seconds(2)
 
     typealias HandlerFactory = (_ kind: ListenerKind, _ connection: NWConnection, _ id: UUID,
                                 _ manager: ProxyServerManager) -> ProxyConnectionHandler?
@@ -33,6 +40,8 @@ final class ProxyServerManager: @unchecked Sendable {
     private var config: Configuration?
     private var listeners: [ListenerKind: NWListener] = [:]
     private var handlers: [UUID: ProxyConnectionHandler] = [:]
+    private var boundPorts: [ListenerKind: Int] = [:]
+    private var tickTimer: DispatchSourceTimer?
 
     init(makeHandler: @escaping HandlerFactory, onEvent: @escaping @Sendable (ProxyEvent) -> Void) {
         self.makeHandler = makeHandler
@@ -80,6 +89,12 @@ final class ProxyServerManager: @unchecked Sendable {
         emit(.log(level, message))
     }
 
+    /// 리스너가 실제로 바인딩한 포트 (port 0으로 시작한 경우 시스템이 고른 값).
+    func boundPort(_ kind: ListenerKind) -> Int? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return boundPorts[kind]
+    }
+
     func redact(_ address: String) -> String {
         Redactor.address(address, reveal: config?.revealAddressesInLogs ?? false)
     }
@@ -101,9 +116,27 @@ final class ProxyServerManager: @unchecked Sendable {
         } else {
             emit(.listener(.http, .disabled))
         }
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.tickInterval, repeating: Self.tickInterval, leeway: .milliseconds(500))
+        timer.setEventHandler { [weak self] in self?.tick() }
+        timer.resume()
+        tickTimer = timer
+    }
+
+    private func tick() {
+        let now = ProcessInfo.processInfo.systemUptime
+        for handler in Array(handlers.values) {
+            if let info = handler.tick(now: now) {
+                emit(.connectionUpdated(info))
+            }
+        }
     }
 
     private func stopOnQueue() {
+        tickTimer?.cancel()
+        tickTimer = nil
+        boundPorts.removeAll()
         for (kind, listener) in listeners {
             listener.stateUpdateHandler = nil
             listener.newConnectionHandler = nil
@@ -123,7 +156,9 @@ final class ProxyServerManager: @unchecked Sendable {
     }
 
     private func startListener(_ kind: ListenerKind, port: Int) {
-        guard let config, let nwPort = NWEndpoint.Port(rawValue: UInt16(clamping: port)), port > 0 else {
+        // port 0은 테스트용: 시스템이 빈 포트를 고른다. 앱 설정에서는 1024 이상만 허용된다.
+        let nwPort: NWEndpoint.Port? = port == 0 ? .any : NWEndpoint.Port(rawValue: UInt16(clamping: port))
+        guard let config, let nwPort, (0...65535).contains(port) else {
             emit(.listener(kind, .failed("잘못된 포트")))
             return
         }
@@ -165,6 +200,7 @@ final class ProxyServerManager: @unchecked Sendable {
             break
         case .ready:
             let actual = Int(listener.port?.rawValue ?? UInt16(clamping: port))
+            boundPorts[kind] = actual
             emit(.listener(kind, .ready(port: actual)))
             emit(.log(.info, "\(kind.title) 리스너 시작: 포트 \(actual)"))
         case .waiting(let error):

@@ -102,7 +102,8 @@ final class AppState {
             accessPolicy: settings.accessPolicy,
             allowList: settings.allowList.compactMap { IPAddressRange(cidr: $0) },
             credentials: credentials,
-            revealAddressesInLogs: settings.logLevel == .debug)
+            revealAddressesInLogs: settings.logLevel == .debug,
+            outboundRoute: settings.outboundRoute)
 
         lastError = nil
         runRequested = true

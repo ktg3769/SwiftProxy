@@ -39,6 +39,16 @@ struct SettingsView: View {
                 authSection
 
                 Section {
+                    Picker("외부 연결 경로", selection: $draft.outboundRoute) {
+                        ForEach(OutboundRoute.allCases) { Text($0.title).tag($0) }
+                    }
+                } header: {
+                    Text("외부 연결")
+                } footer: {
+                    Text("'셀룰러만'은 프록시가 대상 서버로 나가는 연결에 셀룰러 인터페이스를 요구합니다 (Network.framework requiredInterfaceType). Wi-Fi에 연결된 상태에서도 셀룰러로 나가게 하려는 용도이며, 셀룰러가 없으면 연결이 실패합니다. 이 앱의 프록시 연결에만 적용되고 iPhone의 다른 트래픽에는 영향을 주지 않습니다. 실기기 검증 전입니다.")
+                }
+
+                Section {
                     Toggle("앱 실행 시 자동 시작", isOn: $draft.autoStart)
                     Picker("로그 수준", selection: $draft.logLevel) {
                         ForEach(LogLevel.allCases) { Text($0.title).tag($0) }
