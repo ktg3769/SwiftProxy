@@ -58,13 +58,14 @@ jobs:
       - name: Unit tests (simulator)
         run: |
           set -o pipefail
+          mkdir -p build
           xcodebuild test \
             -project "$APP_NAME.xcodeproj" \
             -scheme "$SCHEME" \
             -destination "id=${{ steps.sim.outputs.udid }}" \
             -resultBundlePath build/TestResults.xcresult \
             CODE_SIGNING_ALLOWED=NO \
-            -quiet
+            -quiet 2>&1 | tee build/test.log
 
       - name: Archive (Release, device, unsigned)
         run: |
@@ -78,7 +79,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            -quiet
+            -quiet 2>&1 | tee build/archive.log
           ls -la "build/$APP_NAME.xcarchive/Products/Applications/"
 
       - name: Package unsigned IPA
@@ -100,6 +101,20 @@ jobs:
           path: build/${{ env.APP_NAME }}-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
+
+      # Actions 로그 본문을 볼 수 없는 환경에서도 원인을 확인할 수 있도록
+      # 컴파일 오류와 실패한 테스트를 하나의 annotation으로 요약한다.
+      - name: Summarize failures
+        if: failure()
+        run: |
+          SUMMARY=$(cat build/*.log 2>/dev/null \
+            | grep -E "error:|: failed|Test Case .* failed|XCTAssert|Fatal error|\*\* (TEST|ARCHIVE) FAILED" \
+            | sed -E 's#^/Users/runner/work/[^/]+/[^/]+/##' \
+            | awk '!seen[$0]++' | head -60 | cut -c1-400)
+          if [ -n "$SUMMARY" ]; then
+            ENCODED=$(printf '%s' "$SUMMARY" | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Build/test failures::${ENCODED}"
+          fi
 
       - name: Upload test results
         if: always()
