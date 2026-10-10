@@ -210,8 +210,8 @@ private final class ProxyHarness: @unchecked Sendable {
     }
 
     func start(socks: Int? = 0, http: Int? = 0, credentials: ProxyCredentials? = nil,
-               allowLoopback: Bool = true) async throws -> (socks: UInt16, http: UInt16) {
-        manager.start(.init(socksPort: socks, httpPort: http, accessPolicy: .localNetworkOnly, allowList: [],
+               allowLoopback: Bool = true, policy: AccessPolicy = .localNetworkOnly) async throws -> (socks: UInt16, http: UInt16) {
+        manager.start(.init(socksPort: socks, httpPort: http, accessPolicy: policy, allowList: [],
                             credentials: credentials, revealAddressesInLogs: false,
                             allowLoopbackTargets: allowLoopback))
         let deadline = Date().addingTimeInterval(5)
@@ -246,6 +246,17 @@ private final class ProxyHarness: @unchecked Sendable {
     }
 
     func stop() { manager.stop() }
+
+    /// 실패 원인 파악용: 프록시가 남긴 로그와 리스너 이벤트 요약.
+    func logSummary() -> String {
+        events.withLock { $0 }.compactMap { event -> String? in
+            switch event {
+            case .log(let level, let message): return "[\(level.rawValue)] \(message)"
+            case .listener(let kind, let status): return "\(kind.rawValue)=\(status.title)"
+            default: return nil
+            }
+        }.joined(separator: " | ")
+    }
 }
 
 final class ProxyIntegrationTests: XCTestCase {
@@ -258,6 +269,9 @@ final class ProxyIntegrationTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        if let run = testRun, run.failureCount > 0, let harness {
+            XCTFail("proxy log: " + String(harness.logSummary().prefix(600)))
+        }
         harness?.stop()
         target?.stop()
         harness = nil
@@ -289,6 +303,18 @@ final class ProxyIntegrationTests: XCTestCase {
         try await client.send("hello proxy")
         let echoed = try await client.receive(exactly: 11)
         XCTAssertEqual(String(decoding: echoed, as: UTF8.self), "hello proxy")
+        client.close()
+    }
+
+    /// 접근 정책 검사를 하지 않는 구성. localNetworkOnly 테스트와 비교해 원인을 좁히기 위한 것.
+    func testSOCKS5AnyonePolicyEcho() async throws {
+        let targetPort = try await target.start()
+        let ports = try await harness.start(policy: .anyone)
+        let (client, code) = try await socksConnect(proxyPort: ports.socks, request: ipv4Request(port: targetPort))
+        XCTAssertEqual(code, 0)
+        try await client.send("anyone")
+        let echoed = try await client.receive(exactly: 6)
+        XCTAssertEqual(echoed, Data("anyone".utf8))
         client.close()
     }
 

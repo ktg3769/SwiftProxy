@@ -121,12 +121,12 @@ jobs:
               print("xcresult parse failed:", e); sys.exit(0)
           print("tests: passed=%s failed=%s skipped=%s" % (d.get("passedTests"), d.get("failedTests"), d.get("skippedTests")))
           for f in d.get("testFailures", []):
-              print("FAIL", f.get("testIdentifierString") or f.get("testName"), "->", (f.get("failureText") or "").replace("\n", " ")[:300])
+              print("FAIL", f.get("testIdentifierString") or f.get("testName"), "->", (f.get("failureText") or "").replace("\n", " ")[:700])
           '
             fi
             echo "--- tail of test.log ---"
             tail -n 15 build/test.log 2>/dev/null
-          } | awk '!seen[$0]++' | head -80 | cut -c1-400 > build/summary.txt
+          } | awk '!seen[$0]++' | head -80 | cut -c1-900 > build/summary.txt
           if [ -s build/summary.txt ]; then
             ENCODED=$(sed -e 's/%/%25/g' build/summary.txt | awk '{printf "%s%%0A", $0}')
             echo "::error title=Build/test failures::${ENCODED}"
