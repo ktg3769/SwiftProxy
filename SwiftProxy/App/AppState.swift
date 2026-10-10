@@ -21,6 +21,8 @@ final class AppState {
     private(set) var lastError: String?
     private(set) var lanAddresses: [InterfaceAddress] = []
     private(set) var backgroundStatus: BackgroundTaskManager.Status = .inactive
+    /// 이번 실행에서 수락한 연결 수 (진단용: 다른 기기의 연결이 실제로 들어오는지 확인).
+    private(set) var acceptedTotal = 0
     private(set) var isInBackground = false
     /// 이전 세션이 비정상 종료되었거나 시스템이 백그라운드 작업을 끝낸 경우의 안내.
     private(set) var sessionNotice: String?
@@ -353,8 +355,12 @@ final class AppState {
                 lastError = "\(kind.title): \(reason)"
             }
             if runRequested { pushHeartbeat(force: true) }
-        case .connectionOpened(let info), .connectionUpdated(let info):
+        case .connectionOpened(let info):
             guard runRequested else { return }
+            acceptedTotal += 1
+            connections[info.id] = info
+        case .connectionUpdated(let info):
+            guard runRequested, connections[info.id] != nil else { return }
             connections[info.id] = info
         case .connectionClosed(let id):
             connections.removeValue(forKey: id)

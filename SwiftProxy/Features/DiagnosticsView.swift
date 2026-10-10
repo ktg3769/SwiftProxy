@@ -59,10 +59,11 @@ struct DiagnosticsView: View {
             LabeledContent("HTTP :\(s.httpPort)", value: s.httpEnabled ? app.httpStatus.title : "꺼짐")
             LabeledContent("접근 정책", value: s.accessPolicy.title)
             LabeledContent("인증", value: s.authEnabled ? "사용 (\(s.authUsername))" : "사용 안 함")
+            LabeledContent("누적 수락 연결", value: "\(app.acceptedTotal)")
         } header: {
             Text("리스너")
         } footer: {
-            Text("바인딩 정책: 모든 로컬 주소(IPv4/IPv6)에서 수신하고, 셀룰러 인터페이스(pdp_ip*) 주소로 들어온 연결은 수락 직후 닫습니다. '로컬 네트워크만' 정책에서는 연결을 받을 때 출발지 IP가 사설 대역인지 검사합니다. IPv6 수신은 실기기에서 아직 검증하지 않았습니다.")
+            Text("바인딩 정책: BSD 소켓으로 0.0.0.0(IPv4)과 ::(IPv6)에서 수신합니다(a-shell 서버와 같은 방식). 셀룰러 인터페이스(pdp_ip*) 주소로 들어온 연결은 수락 직후 닫습니다. '로컬 네트워크만' 정책에서는 연결을 받을 때 출발지 IP가 사설 대역인지 검사합니다. IPv6 수신은 실기기에서 아직 검증하지 않았습니다.")
         }
     }
 

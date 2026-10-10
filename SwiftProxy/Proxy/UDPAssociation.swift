@@ -1,13 +1,15 @@
 import Foundation
+import Darwin
 import Network
 
 /// SOCKS5 UDP ASSOCIATE 하나를 처리한다.
 ///
 /// 클라이언트(예: 아이패드의 Shadowrocket)는 "SOCKS5 헤더 + 페이로드" 데이터그램을 이 객체의 UDP 포트로 보낸다.
 /// 헤더의 목적지로 페이로드를 보내고, 목적지의 응답에는 같은 형식의 헤더를 붙여 클라이언트에게 돌려준다.
+/// - 클라이언트 쪽은 BSD UDP 소켓(0.0.0.0:임의 포트)으로 받는다 (TCP 리스너와 같은 이유).
 /// - TCP 제어 연결의 상대 IP에서 온 데이터그램만 받는다.
 /// - 조각(FRAG != 0)은 지원하지 않고 버린다.
-/// - 목적지별 UDP 흐름은 일정 시간 쓰이지 않으면 닫는다.
+/// - 목적지별 UDP 흐름(NWConnection)은 일정 시간 쓰이지 않으면 닫는다.
 /// 모든 메서드는 프록시 서버 큐에서 호출된다.
 final class UDPAssociation {
     static let maxDestinations = 256
@@ -32,11 +34,12 @@ final class UDPAssociation {
     private let onTraffic: (_ up: Int, _ down: Int) -> Void
     private let onWarning: (String) -> Void
 
-    private var listener: NWListener?
-    private var clientFlow: NWConnection?
+    private var fd: Int32 = -1
+    private var readSource: DispatchSourceRead?
+    private var clientSockaddr: sockaddr_storage?
     private var destinations: [String: Destination] = [:]
     private var closed = false
-    private var warnedLocalNetwork = false
+    private var warnedSendFailure = false
     private(set) var lastActivity: TimeInterval = ProcessInfo.processInfo.systemUptime
 
     var destinationCount: Int { destinations.count }
@@ -51,42 +54,33 @@ final class UDPAssociation {
         self.onWarning = onWarning
     }
 
-    /// 클라이언트용 UDP 포트를 연다. 완료되면 바인딩된 포트를 돌려준다.
-    func start(completion: @escaping (Result<UInt16, Error>) -> Void) {
-        let listener: NWListener
-        do {
-            listener = try NWListener(using: .udp, on: .any)
-        } catch {
-            completion(.failure(error))
-            return
+    deinit { close() }
+
+    /// 클라이언트용 UDP 소켓을 연다. family는 TCP 제어 연결이 들어온 주소의 종류(AF_INET/AF_INET6).
+    /// - Returns: 바인딩된 포트
+    func start(family: Int32) throws -> UInt16 {
+        let socketFD = socket(family, SOCK_DGRAM, IPPROTO_UDP)
+        guard socketFD >= 0 else { throw SocketAddress.error(errno) }
+        if SocketAddress.bindAny(socketFD, family: family, port: 0) != 0 {
+            let code = errno
+            Darwin.close(socketFD)
+            throw SocketAddress.error(code)
         }
-        self.listener = listener
-        var reported = false
-        listener.stateUpdateHandler = { [weak self, weak listener] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                guard !reported else { return }
-                reported = true
-                completion(.success(listener?.port?.rawValue ?? 0))
-            case .failed(let error):
-                if !reported {
-                    reported = true
-                    completion(.failure(error))
-                }
-                self.close()
-            default:
-                break
-            }
-        }
-        listener.newConnectionHandler = { [weak self] flow in
-            self?.accept(flow)
-        }
-        listener.start(queue: queue)
+        SocketAddress.setNonBlocking(socketFD)
+        let port = SocketAddress.local(of: socketFD).map(SocketAddress.port) ?? 0
+
+        fd = socketFD
+        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
+        source.setEventHandler { [weak self] in self?.readDatagrams() }
+        source.setCancelHandler { Darwin.close(socketFD) }
+        source.activate()
+        readSource = source
+        return port
     }
 
     func tick(now: TimeInterval) {
         for (key, destination) in destinations where now - destination.lastActivity > Self.destinationIdleTimeout {
+            destination.connection.stateUpdateHandler = nil
             destination.connection.cancel()
             destinations[key] = nil
         }
@@ -95,12 +89,9 @@ final class UDPAssociation {
     func close() {
         guard !closed else { return }
         closed = true
-        listener?.stateUpdateHandler = nil
-        listener?.newConnectionHandler = nil
-        listener?.cancel()
-        listener = nil
-        clientFlow?.cancel()
-        clientFlow = nil
+        readSource?.cancel()   // 취소 핸들러에서 소켓을 닫는다
+        readSource = nil
+        fd = -1
         for destination in destinations.values {
             destination.connection.stateUpdateHandler = nil
             destination.connection.cancel()
@@ -110,39 +101,27 @@ final class UDPAssociation {
 
     // MARK: - Client side
 
-    private func accept(_ flow: NWConnection) {
-        guard !closed,
-              let remote = ProxyServerManager.hostString(flow.endpoint),
-              IPParser.bytes(remote) == clientAddress else {
-            flow.cancel()
-            return
-        }
-        // 클라이언트가 출발 포트를 바꾼 경우 새 흐름으로 교체한다.
-        if let existing = clientFlow, existing !== flow {
-            existing.cancel()
-        }
-        clientFlow = flow
-        flow.stateUpdateHandler = { [weak self, weak flow] state in
-            if case .waiting = state, let flow { self?.checkLocalNetworkDenied(flow) }
-        }
-        flow.start(queue: queue)
-        receiveFromClient(flow)
-    }
-
-    private func receiveFromClient(_ flow: NWConnection) {
-        flow.receiveMessage { [weak self, weak flow] data, _, _, error in
-            guard let self, let flow, !self.closed else { return }
-            if let data, !data.isEmpty {
-                self.handleClientDatagram(data)
+    private func readDatagrams() {
+        guard !closed, fd >= 0 else { return }
+        var buffer = [UInt8](repeating: 0, count: 65536)
+        while !closed {
+            var from = sockaddr_storage()
+            var fromLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                withUnsafeMutablePointer(to: &from) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        recvfrom(fd, raw.baseAddress, raw.count, 0, $0, &fromLength)
+                    }
+                }
             }
-            if error == nil {
-                self.receiveFromClient(flow)
-            }
+            if count < 0 { return }   // EAGAIN: 더 읽을 데이터 없음
+            guard let sender = SocketAddress.string(from), IPParser.bytes(sender) == clientAddress else { continue }
+            clientSockaddr = from
+            handleClientDatagram(Array(buffer[0..<count]))
         }
     }
 
-    private func handleClientDatagram(_ data: Data) {
-        let bytes = [UInt8](data)
+    private func handleClientDatagram(_ bytes: [UInt8]) {
         guard let header = SOCKS5.parseUDPHeader(bytes), header.fragment == 0 else { return }
         if !allowLoopbackTargets && header.host.isLoopback { return }
         let payload = Data(bytes[header.length...])
@@ -160,6 +139,23 @@ final class UDPAssociation {
         destination.lastActivity = now
         onTraffic(payload.count, 0)
         destination.connection.send(content: payload, completion: .contentProcessed { _ in })
+    }
+
+    private func sendToClient(_ data: Data) {
+        guard !closed, fd >= 0, var address = clientSockaddr else { return }
+        let length = socklen_t(address.ss_len)
+        let sent = data.withUnsafeBytes { raw -> Int in
+            withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    sendto(fd, raw.baseAddress, raw.count, 0, $0, length)
+                }
+            }
+        }
+        if sent < 0 && !warnedSendFailure {
+            warnedSendFailure = true
+            let code = errno
+            onWarning("UDP 응답을 클라이언트로 보내지 못했습니다 (errno \(code)). 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 SwiftProxy가 켜져 있는지 확인하세요.")
+        }
     }
 
     // MARK: - Destination side
@@ -194,24 +190,16 @@ final class UDPAssociation {
     private func receiveFromDestination(_ destination: Destination) {
         destination.connection.receiveMessage { [weak self, weak destination] data, _, _, error in
             guard let self, let destination, !self.closed else { return }
-            if let data, !data.isEmpty, let flow = self.clientFlow {
+            if let data, !data.isEmpty {
                 let now = ProcessInfo.processInfo.systemUptime
                 destination.lastActivity = now
                 self.lastActivity = now
                 self.onTraffic(0, data.count)
-                flow.send(content: destination.replyHeader + data, completion: .contentProcessed { [weak self, weak flow] sendError in
-                    if sendError != nil, let flow { self?.checkLocalNetworkDenied(flow) }
-                })
+                self.sendToClient(destination.replyHeader + data)
             }
             if error == nil {
                 self.receiveFromDestination(destination)
             }
         }
-    }
-
-    private func checkLocalNetworkDenied(_ flow: NWConnection) {
-        guard !warnedLocalNetwork, flow.currentPath?.unsatisfiedReason == .localNetworkDenied else { return }
-        warnedLocalNetwork = true
-        onWarning("로컬 네트워크 권한이 없어 UDP 응답을 보낼 수 없습니다. 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 SwiftProxy를 켜세요.")
     }
 }

@@ -12,6 +12,10 @@ protocol ProxyConnectionHandler: AnyObject {
 
 /// 리스너와 연결의 수명을 관리한다.
 /// 내부 상태는 전용 직렬 큐(queue)에서만 접근하며, UI에는 ProxyEvent로만 알린다.
+///
+/// 수신은 BSD 소켓(SocketListener)으로 한다. Network.framework의 NWListener는 iPhone 안에서의 자체 접속은
+/// 받았지만 개인용 핫스팟에 연결된 아이패드의 연결은 받지 못한 것이 실기기에서 확인되었다.
+/// 같은 기기에서 BSD 소켓을 쓰는 a-shell(Python) 서버는 연결을 받으므로 같은 방식을 쓴다.
 final class ProxyServerManager: @unchecked Sendable {
     struct Configuration: Sendable {
         var socksPort: Int?
@@ -29,7 +33,7 @@ final class ProxyServerManager: @unchecked Sendable {
     /// 연결 정보 갱신과 타임아웃 검사 주기. 연결마다 타이머를 두지 않고 이 타이머 하나로 처리한다.
     static let tickInterval: DispatchTimeInterval = .seconds(2)
 
-    typealias HandlerFactory = (_ kind: ListenerKind, _ connection: NWConnection, _ id: UUID,
+    typealias HandlerFactory = (_ kind: ListenerKind, _ transport: SocketTransport, _ id: UUID,
                                 _ manager: ProxyServerManager) -> ProxyConnectionHandler?
 
     let queue = DispatchQueue(label: "com.taegun.swiftproxy.server", qos: .userInitiated)
@@ -38,7 +42,7 @@ final class ProxyServerManager: @unchecked Sendable {
     private let emit: @Sendable (ProxyEvent) -> Void
     private let makeHandler: HandlerFactory
     private var config: Configuration?
-    private var listeners: [ListenerKind: NWListener] = [:]
+    private var listeners: [ListenerKind: SocketListener] = [:]
     private var handlers: [UUID: ProxyConnectionHandler] = [:]
     private var boundPorts: [ListenerKind: Int] = [:]
     private var tickTimer: DispatchSourceTimer?
@@ -63,7 +67,7 @@ final class ProxyServerManager: @unchecked Sendable {
     }
 
     func closeAllConnections() {
-        queue.async { self.handlers.values.forEach { $0.cancel() } }
+        queue.async { Array(self.handlers.values).forEach { $0.cancel() } }
     }
 
     // MARK: - Handler callbacks (queue 위에서 호출)
@@ -138,8 +142,6 @@ final class ProxyServerManager: @unchecked Sendable {
         tickTimer = nil
         boundPorts.removeAll()
         for (kind, listener) in listeners {
-            listener.stateUpdateHandler = nil
-            listener.newConnectionHandler = nil
             listener.cancel()
             emit(.listener(kind, .stopped))
         }
@@ -157,95 +159,51 @@ final class ProxyServerManager: @unchecked Sendable {
 
     private func startListener(_ kind: ListenerKind, port: Int) {
         // port 0은 테스트용: 시스템이 빈 포트를 고른다. 앱 설정에서는 1024 이상만 허용된다.
-        let nwPort: NWEndpoint.Port? = port == 0 ? .any : NWEndpoint.Port(rawValue: UInt16(clamping: port))
-        guard let config, let nwPort, (0...65535).contains(port) else {
+        guard config != nil, (0...65535).contains(port) else {
             emit(.listener(kind, .failed("잘못된 포트")))
             return
         }
-
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        // 리스너에 인터페이스 제한(prohibitedInterfaceTypes)을 걸지 않는다.
-        // 개인용 핫스팟 모드에서는 iPhone의 외부 경로가 셀룰러뿐이라, 셀룰러를 금지하면
-        // 리스너 경로 자체가 성립하지 않을 수 있다. 셀룰러로 들어온 연결은 ProxySession이
-        // 수락 직후 로컬 주소의 인터페이스 이름(pdp_ip*)으로 판별해 닫는다.
-        // 접근 제어는 accept 시점의 앱 수준 검사(AccessControl)로만 한다.
-        // NWParameters.acceptLocalOnly는 loopback 연결까지 거부하는 것이 CI에서 확인되었고,
-        // 실기기에서의 정확한 판정 기준도 문서로 확인할 수 없어 사용하지 않는다.
-
-        let listener: NWListener
-        do {
-            listener = try NWListener(using: parameters, on: nwPort)
-        } catch {
-            emit(.listener(kind, .failed(Self.describe(error, port: port))))
-            emit(.log(.error, "\(kind.title) 리스너 생성 실패: \(Self.describe(error, port: port))"))
-            return
-        }
-
-        listener.stateUpdateHandler = { [weak self, weak listener] state in
-            guard let self, let listener else { return }
-            self.listenerStateChanged(kind, listener: listener, state: state, port: port)
-        }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection, kind: kind)
-        }
-        listeners[kind] = listener
         emit(.listener(kind, .starting))
-        listener.start(queue: queue)
-    }
-
-    private func listenerStateChanged(_ kind: ListenerKind, listener: NWListener, state: NWListener.State, port: Int) {
-        // 이미 교체되었거나 중지된 리스너의 늦은 콜백은 무시한다.
-        guard listeners[kind] === listener else { return }
-        switch state {
-        case .setup:
-            break
-        case .ready:
-            let actual = Int(listener.port?.rawValue ?? UInt16(clamping: port))
-            boundPorts[kind] = actual
-            emit(.listener(kind, .ready(port: actual)))
-            emit(.log(.info, "\(kind.title) 리스너 시작: 포트 \(actual)"))
-        case .waiting(let error):
-            emit(.listener(kind, .waiting(Self.describe(error, port: port))))
-            emit(.log(.warning, "\(kind.title) 리스너 대기: \(Self.describe(error, port: port))"))
-        case .failed(let error):
+        do {
+            let listener = try SocketListener(port: UInt16(port), queue: queue) { [weak self] transport in
+                self?.accept(transport, kind: kind)
+            }
+            listeners[kind] = listener
+            boundPorts[kind] = Int(listener.port)
+            listener.start()
+            emit(.listener(kind, .ready(port: Int(listener.port))))
+            emit(.log(.info, "\(kind.title) 리스너 시작: 0.0.0.0:\(listener.port)"))
+        } catch {
             let message = Self.describe(error, port: port)
             emit(.listener(kind, .failed(message)))
             emit(.log(.error, "\(kind.title) 리스너 실패: \(message)"))
-            listener.cancel()
-            listeners[kind] = nil
-        case .cancelled:
-            listeners[kind] = nil
-            emit(.listener(kind, .stopped))
-        @unknown default:
-            break
         }
     }
 
-    private func accept(_ connection: NWConnection, kind: ListenerKind) {
+    private func accept(_ transport: SocketTransport, kind: ListenerKind) {
         guard let config else {
-            connection.cancel()
+            transport.cancel()
             return
         }
 
-        let remote = Self.hostString(connection.endpoint)
+        let remote = transport.remoteAddress
         guard let remote,
               AccessControl.isAllowed(address: remote, policy: config.accessPolicy, allowList: config.allowList) else {
-            connection.cancel()
+            transport.cancel()
             emit(.log(.warning, "접근 거부: \(remote.map(redact) ?? "알 수 없는 주소") → \(kind.title)"))
             return
         }
 
         guard handlers.count < config.maxConnections else {
-            connection.cancel()
+            transport.cancel()
             emit(.log(.warning, "동시 연결 한도(\(config.maxConnections)) 초과로 연결 거부"))
             return
         }
 
         let id = UUID()
-        guard let handler = makeHandler(kind, connection, id, self) else {
-            connection.cancel()
-            emit(.log(.warning, "\(kind.title) 처리기가 아직 구현되지 않아 연결을 닫았습니다."))
+        guard let handler = makeHandler(kind, transport, id, self) else {
+            transport.cancel()
+            emit(.log(.warning, "\(kind.title) 처리기를 만들지 못해 연결을 닫았습니다."))
             return
         }
         handlers[id] = handler

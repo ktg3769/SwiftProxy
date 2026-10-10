@@ -37,7 +37,10 @@
 - BGContinuedProcessingTask의 시스템 Live Activity와 앱 자체 Live Activity가 **동시에 두 개** 보일 수 있습니다. 앱 자체 Live Activity는 설정에서 끌 수 있습니다.
 - 갱신 간격은 최소 5초이며, 내용이 같으면 생략합니다.
 
-## 4. NWListener / NWConnection과 백그라운드
+## 4. 수신 소켓과 백그라운드
+
+- 수신은 BSD 소켓(0.0.0.0, ::)으로 합니다. Network.framework `NWListener`는 실기기에서 iPhone 자체 접속은 받았지만 개인용 핫스팟에 연결된 아이패드의 연결은 받지 못했습니다(확인됨: 사용자 실기기 테스트). 같은 기기의 a-shell(Python, BSD 소켓)은 받았으므로 같은 방식으로 바꿨습니다.
+- 대상 서버로 나가는 연결은 계속 `NWConnection`을 씁니다.
 
 - 프로세스가 실행 중(포그라운드 또는 BGContinuedProcessingTask 실행 중)이면 리스너와 연결은 정상 동작해야 합니다. (추정: 백그라운드 상태에서의 수신은 실기기 미검증)
 - 프로세스가 일시 중지되면 기존 TCP 연결은 응답하지 않게 되고, 클라이언트 쪽에서 시간 초과가 납니다.

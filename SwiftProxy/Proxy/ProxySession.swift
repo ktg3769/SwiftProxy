@@ -2,6 +2,7 @@ import Foundation
 import Network
 
 /// 클라이언트 연결 하나를 처리한다: SOCKS5 또는 HTTP 핸드셰이크 → 대상 연결 → 양방향 중계.
+/// 클라이언트 쪽은 BSD 소켓(SocketTransport), 대상 쪽은 NWConnection(NWTransport)이다.
 /// 모든 상태는 ProxyServerManager.queue 위에서만 바뀐다.
 final class ProxySession: ProxyConnectionHandler {
     private enum Phase: Equatable {
@@ -23,10 +24,11 @@ final class ProxySession: ProxyConnectionHandler {
 
     let id: UUID
     private let kind: ListenerKind
-    private let client: NWConnection
+    private let client: SocketTransport
     private weak var manager: ProxyServerManager?
     private let config: ProxyServerManager.Configuration
     private var remote: NWConnection?
+    private var remoteStream: NWTransport?
     private var buffer: [UInt8] = []
     private var phase: Phase
     private var info: ConnectionInfo
@@ -37,7 +39,7 @@ final class ProxySession: ProxyConnectionHandler {
     private var downFinished = false
     private var udp: UDPAssociation?
 
-    init(kind: ListenerKind, client: NWConnection, id: UUID, manager: ProxyServerManager,
+    init(kind: ListenerKind, client: SocketTransport, id: UUID, manager: ProxyServerManager,
          configuration: ProxyServerManager.Configuration, clientLabel: String) {
         self.id = id
         self.kind = kind
@@ -55,35 +57,12 @@ final class ProxySession: ProxyConnectionHandler {
     // MARK: - ProxyConnectionHandler
 
     func start() {
-        client.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                self?.rejectIfArrivedOverCellular()
-            case .failed, .cancelled:
-                self?.close()
-            default:
-                break
-            }
-        }
-        client.start(queue: queueOrMain)
+        if rejectIfArrivedOverCellular() { return }
         receiveHandshake()
     }
 
     func cancel() {
         close()
-    }
-
-    /// 셀룰러 인터페이스(pdp_ip*)의 주소로 들어온 연결은 외부 인터넷에서 온 것이므로 닫는다.
-    private func rejectIfArrivedOverCellular() {
-        guard let local = client.currentPath?.localEndpoint.flatMap(ProxyServerManager.hostString),
-              let localBytes = IPParser.bytes(local) else { return }
-        let cellular = InterfaceAddresses.all().contains {
-            $0.name.hasPrefix("pdp_ip") && IPParser.bytes($0.address) == localBytes
-        }
-        if cellular {
-            manager?.log(.warning, "셀룰러 인터페이스로 들어온 연결을 거부했습니다 (\(info.clientLabel))")
-            close()
-        }
     }
 
     func tick(now: TimeInterval) -> ConnectionInfo? {
@@ -122,6 +101,19 @@ final class ProxySession: ProxyConnectionHandler {
         return info
     }
 
+    /// 셀룰러 인터페이스(pdp_ip*)의 주소로 들어온 연결은 외부 인터넷에서 온 것이므로 닫는다.
+    private func rejectIfArrivedOverCellular() -> Bool {
+        guard let local = client.localAddress, let localBytes = IPParser.bytes(local) else { return false }
+        let cellular = InterfaceAddresses.all().contains {
+            $0.name.hasPrefix("pdp_ip") && IPParser.bytes($0.address) == localBytes
+        }
+        if cellular {
+            manager?.log(.warning, "셀룰러 인터페이스로 들어온 연결을 거부했습니다 (\(info.clientLabel))")
+            close()
+        }
+        return cellular
+    }
+
     // MARK: - Handshake
 
     private var queueOrMain: DispatchQueue { manager?.queue ?? .main }
@@ -134,7 +126,7 @@ final class ProxySession: ProxyConnectionHandler {
     }
 
     private func receiveHandshake() {
-        client.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, isComplete, error in
+        client.receive(maximumLength: 16 * 1024) { [weak self] data, isComplete, error in
             guard let self, self.isHandshaking else { return }
             if let data, !data.isEmpty {
                 self.buffer.append(contentsOf: data)
@@ -263,7 +255,7 @@ final class ProxySession: ProxyConnectionHandler {
             return beginUDPAssociate()
         }
         guard request.command == SOCKS5.Command.connect else {
-            manager?.log(.info, "SOCKS5 명령 \(request.command) 미지원 (CONNECT만 지원)")
+            manager?.log(.info, "SOCKS5 명령 \(request.command) 미지원 (CONNECT, UDP ASSOCIATE만 지원)")
             return sendAndClose(SOCKS5.reply(.commandNotSupported))
         }
         let target = request.host.display(port: request.port)
@@ -285,25 +277,20 @@ final class ProxySession: ProxyConnectionHandler {
         }
     }
 
-    /// UDP ASSOCIATE: 클라이언트용 UDP 포트를 열고 그 주소를 알려 준다.
+    /// UDP ASSOCIATE: 클라이언트용 UDP 소켓을 열고 그 주소를 알려 준다.
     /// TCP 제어 연결이 열려 있는 동안만 중계하며, 제어 연결이 끊기면 함께 닫는다 (RFC 1928 7절).
     private func beginUDPAssociate() {
-        guard let peer = ProxyServerManager.hostString(client.endpoint), let peerBytes = IPParser.bytes(peer) else {
+        guard let peer = client.remoteAddress, let peerBytes = IPParser.bytes(peer) else {
             return sendAndClose(SOCKS5.reply(.generalFailure))
         }
         // 클라이언트가 UDP를 보낼 주소: TCP 제어 연결이 들어온 iPhone 쪽 주소 (예: 172.20.10.1)
-        let bindHost: TargetHost = {
-            if let local = client.currentPath?.localEndpoint.flatMap(ProxyServerManager.hostString),
-               let b = IPParser.bytes(local) {
-                return b.count == 4 ? .ipv4(b) : .ipv6(b)
-            }
-            return .ipv4([0, 0, 0, 0])
-        }()
+        let localBytes = client.localAddress.flatMap(IPParser.bytes)
+        let bindHost: TargetHost = localBytes.map { $0.count == 4 ? .ipv4($0) : .ipv6($0) } ?? .ipv4([0, 0, 0, 0])
+        let family = (localBytes?.count ?? 4) == 16 ? AF_INET6 : AF_INET
+
         info.kind = .socks5UDP
         info.target = "UDP"
         infoDirty = true
-        phase = .connecting
-        deadline = ProcessInfo.processInfo.systemUptime + Self.handshakeTimeout
 
         let association = UDPAssociation(
             queue: queueOrMain, clientAddress: peerBytes, outboundRoute: config.outboundRoute,
@@ -313,25 +300,23 @@ final class ProxySession: ProxyConnectionHandler {
                 if down > 0 { self?.account(.down, down) }
             },
             onWarning: { [weak self] message in self?.manager?.log(.warning, message) })
-        udp = association
-        association.start { [weak self] result in
-            guard let self, self.phase == .connecting else { return }
-            switch result {
-            case .success(let port):
-                self.phase = .udpAssociated
-                self.lastActivity = ProcessInfo.processInfo.systemUptime
-                self.send(SOCKS5.reply(.succeeded, bind: bindHost, port: port))
-                self.watchControlConnection()
-            case .failure(let error):
-                self.manager?.log(.warning, "UDP 포트를 열지 못했습니다: \(error)")
-                self.sendAndClose(SOCKS5.reply(.generalFailure))
-            }
+        do {
+            let port = try association.start(family: family)
+            udp = association
+            phase = .udpAssociated
+            lastActivity = ProcessInfo.processInfo.systemUptime
+            send(SOCKS5.reply(.succeeded, bind: bindHost, port: port))
+            watchControlConnection()
+        } catch {
+            association.close()
+            manager?.log(.warning, "UDP 소켓을 열지 못했습니다: \(error)")
+            sendAndClose(SOCKS5.reply(.generalFailure))
         }
     }
 
-    /// UDP 연결 동안 TCP 제어 연결은 데이터가 오지 않는다. 끊기면(EOF/오류) UDP 중계도 닫는다.
+    /// UDP 연결 동안 TCP 제어 연결로는 데이터가 오지 않는다. 끊기면(EOF/오류) UDP 중계도 닫는다.
     private func watchControlConnection() {
-        client.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] data, _, isComplete, error in
+        client.receive(maximumLength: 1024) { [weak self] _, isComplete, error in
             guard let self, self.phase == .udpAssociated else { return }
             if isComplete || error != nil {
                 self.close()
@@ -416,7 +401,7 @@ final class ProxySession: ProxyConnectionHandler {
     }
 
     private func servePAC() {
-        let localHost = client.currentPath?.localEndpoint.flatMap(ProxyServerManager.hostString)
+        let localHost = client.localAddress
             ?? InterfaceAddresses.lanAddresses().first?.address
             ?? "127.0.0.1"
         let httpPort = manager?.boundPort(.http) ?? config.httpPort
@@ -449,8 +434,9 @@ final class ProxySession: ProxyConnectionHandler {
 
         let connection = NWConnection(host: nwHost, port: nwPort, using: parameters)
         remote = connection
+        remoteStream = NWTransport(connection)
         var reported = false
-        connection.stateUpdateHandler = { [weak self] state in
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self else { return }
             switch state {
             case .ready:
@@ -465,8 +451,8 @@ final class ProxySession: ProxyConnectionHandler {
                 }
                 reported = true
                 guard self.phase == .connecting else { return }
-                connection.stateUpdateHandler = nil
-                connection.cancel()
+                connection?.stateUpdateHandler = nil
+                connection?.cancel()
                 completion(Self.outcome(for: error, route: self.config.outboundRoute))
             case .cancelled:
                 if self.phase == .relaying { self.close() }
@@ -503,7 +489,7 @@ final class ProxySession: ProxyConnectionHandler {
     // MARK: - Relay
 
     private func startRelay(upstreamPrefix: Data?) {
-        guard phase == .connecting, let remote else { return }
+        guard phase == .connecting, let remoteStream else { return }
         phase = .relaying
         lastActivity = ProcessInfo.processInfo.systemUptime
 
@@ -514,9 +500,9 @@ final class ProxySession: ProxyConnectionHandler {
         }
         if !initial.isEmpty {
             account(.up, initial.count)
-            remote.send(content: initial, completion: .contentProcessed { [weak self] error in
+            remoteStream.send(initial, final: false) { [weak self] error in
                 if error != nil { self?.close() }
-            })
+            }
         }
         pump(.up)
         pump(.down)
@@ -524,14 +510,14 @@ final class ProxySession: ProxyConnectionHandler {
 
     /// 한 방향을 중계한다. 보낸 데이터가 처리된 뒤에야 다음 데이터를 읽는다 (backpressure).
     private func pump(_ direction: Direction) {
-        guard phase == .relaying, let remote else { return }
-        let source = direction == .up ? client : remote
-        let destination = direction == .up ? remote : client
-        source.receive(minimumIncompleteLength: 1, maximumLength: Self.chunkSize) { [weak self] data, _, isComplete, error in
+        guard phase == .relaying, let remoteStream else { return }
+        let source: ByteStream = direction == .up ? client : remoteStream
+        let destination: ByteStream = direction == .up ? remoteStream : client
+        source.receive(maximumLength: Self.chunkSize) { [weak self] data, isComplete, error in
             guard let self, self.phase == .relaying else { return }
             if let data, !data.isEmpty {
                 self.account(direction, data.count)
-                destination.send(content: data, completion: .contentProcessed { [weak self] sendError in
+                destination.send(data, final: false) { [weak self] sendError in
                     guard let self, self.phase == .relaying else { return }
                     if sendError != nil {
                         self.close()
@@ -540,7 +526,7 @@ final class ProxySession: ProxyConnectionHandler {
                     } else {
                         self.pump(direction)
                     }
-                })
+                }
                 return
             }
             if isComplete {
@@ -555,10 +541,9 @@ final class ProxySession: ProxyConnectionHandler {
 
     /// 한 방향이 끝나면 반대편에 FIN을 보낸다 (half-close). 양쪽이 모두 끝나면 연결을 닫는다.
     private func finish(_ direction: Direction) {
-        guard let remote else { return close() }
-        let destination = direction == .up ? remote : client
-        destination.send(content: nil, contentContext: .finalMessage, isComplete: true,
-                         completion: .contentProcessed { _ in })
+        guard let remoteStream else { return close() }
+        let destination: ByteStream = direction == .up ? remoteStream : client
+        destination.send(nil, final: true) { _ in }
         if direction == .up { upFinished = true } else { downFinished = true }
         if upFinished && downFinished { close() }
     }
@@ -585,9 +570,9 @@ final class ProxySession: ProxyConnectionHandler {
     }
 
     private func send(_ data: Data) {
-        client.send(content: data, completion: .contentProcessed { [weak self] error in
+        client.send(data, final: false) { [weak self] error in
             if error != nil { self?.close() }
-        })
+        }
     }
 
     /// 마지막 응답을 보내고 FIN 후 연결을 닫는다.
@@ -596,18 +581,17 @@ final class ProxySession: ProxyConnectionHandler {
         phase = .closing
         remote?.stateUpdateHandler = nil
         remote?.cancel()
-        client.send(content: data, contentContext: .finalMessage, isComplete: true,
-                    completion: .contentProcessed { [weak self] _ in self?.close() })
+        client.send(data, final: true) { [weak self] _ in self?.close() }
     }
 
     private func close() {
         guard phase != .closed else { return }
         phase = .closed
-        client.stateUpdateHandler = nil
-        remote?.stateUpdateHandler = nil
         client.cancel()
+        remote?.stateUpdateHandler = nil
         remote?.cancel()
         remote = nil
+        remoteStream = nil
         udp?.close()
         udp = nil
         manager?.handlerDidFinish(id)
